@@ -15,7 +15,7 @@ export async function getSheetData(sheetId: string): Promise<string[][]> {
     const response = await sheets.spreadsheets.values.get({
       auth,
       spreadsheetId: sheetId,
-      range: 'A4:Z50',
+      range: "'Calendario Maestro Anual'!A4:Z50",
       valueRenderOption: 'FORMATTED_VALUE',
     });
 
