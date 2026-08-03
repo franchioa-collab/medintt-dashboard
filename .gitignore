@@ -1,0 +1,46 @@
+# Dependencies
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Production
+.next
+out
+dist
+
+# Environment variables
+.env.local
+.env.*.local
+.env
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+.turbo
+
+# Test
+coverage
+
+# Config local de herramientas (no pertenece a la app)
+.claude/
+
+# Otros proyectos/archivos de esta carpeta compartida (no pertenecen al dashboard)
+nexus-public/
+ortopedia-system/
+superpowers/
+*.xlsx
+~$*
+ANALISIS_PRICING_MEDINTT_EXPERT.md
+FACA*.md
+N_CA*.md
+Lista Distribuidor*.md
