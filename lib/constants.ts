@@ -1,3 +1,5 @@
+import type { Mes } from './types';
+
 export const EMPRESAS = {
   pire_rayen: {
     id: 'pire_rayen',
@@ -55,7 +57,7 @@ export const COLORES_TIPO = {
   'Buena práctica': 'bg-green-100 text-green-800 border border-green-300',
 };
 
-export const getMesActual = (): string => {
+export const getMesActual = (): Mes => {
   const meses = MESES;
   const mesIndex = new Date().getMonth();
   return meses[mesIndex];

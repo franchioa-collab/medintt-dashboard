@@ -33,8 +33,13 @@
     ]
   },
   "include": [
-    "**/*.ts",
-    "**/*.tsx",
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "components/**/*.ts",
+    "components/**/*.tsx",
+    "lib/**/*.ts",
+    "hooks/**/*.ts",
+    "next-env.d.ts",
     ".next/types/**/*.ts"
   ],
   "references": [
@@ -43,6 +48,9 @@
     }
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "nexus-public",
+    "ortopedia-system",
+    "superpowers"
   ]
 }
