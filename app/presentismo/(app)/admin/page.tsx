@@ -1,15 +1,12 @@
 import { redirect } from 'next/navigation';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
-import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+import { crearClienteServidor, crearClienteAdmin } from '@/lib/presentismo/supabase-server';
 import BadgeResultado from '@/components/presentismo/BadgeResultado';
-import type { Marcacion, Perfil, Sede } from '@/lib/presentismo/database.types';
+import type { Marcacion, Sede } from '@/lib/presentismo/database.types';
 
 const LIMITE = 100;
 
-type MarcacionConDetalle = Marcacion & {
-  empleado: Pick<Perfil, 'nombre_completo'> | null;
-  sede: Pick<Sede, 'nombre'> | null;
-};
+type MarcacionConSede = Marcacion & { sede: Pick<Sede, 'nombre'> | null };
 
 function formatearFechaHora(iso: string) {
   return new Date(iso).toLocaleString('es-AR', {
@@ -31,11 +28,25 @@ export default async function EquipoPage() {
   const supabase = await crearClienteServidor();
   const { data } = await supabase
     .from('marcaciones')
-    .select('*, empleado:perfiles(nombre_completo), sede:sedes(nombre)')
+    .select('*, sede:sedes(nombre)')
     .order('timestamp_marcacion', { ascending: false })
     .limit(LIMITE);
 
-  const marcaciones = (data ?? []) as MarcacionConDetalle[];
+  const marcaciones = (data ?? []) as MarcacionConSede[];
+
+  // La RLS de perfiles solo permite ver la fila propia (evita recursión); los
+  // nombres de los empleados involucrados se resuelven aparte con el cliente
+  // admin. La lista de marcaciones en sí ya viene scopeada por su propia RLS
+  // (admin ve toda la organización, supervisor solo sus sedes).
+  const empleadoIds = [...new Set(marcaciones.map((m) => m.empleado_id))];
+  const admin = crearClienteAdmin();
+  const { data: perfilesData } = await admin
+    .from('perfiles')
+    .select('id, nombre_completo')
+    .in('id', empleadoIds.length > 0 ? empleadoIds : ['']);
+  const nombrePorEmpleadoId = new Map(
+    (perfilesData ?? []).map((p) => [p.id, p.nombre_completo])
+  );
 
   return (
     <div className="space-y-6">
@@ -52,7 +63,7 @@ export default async function EquipoPage() {
           <div key={m.id} className="p-4 flex items-center justify-between text-sm gap-2">
             <div className="min-w-0">
               <p className="font-medium text-gray-800 truncate">
-                {m.empleado?.nombre_completo ?? 'Empleado'}
+                {nombrePorEmpleadoId.get(m.empleado_id) ?? 'Empleado'}
               </p>
               <p className="text-gray-500 truncate">
                 {m.tipo === 'ingreso' ? 'Ingreso' : 'Egreso'} · {formatearFechaHora(m.timestamp_marcacion)}

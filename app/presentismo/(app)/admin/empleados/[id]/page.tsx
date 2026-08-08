@@ -1,6 +1,6 @@
 import { redirect, notFound } from 'next/navigation';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
-import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+import { crearClienteServidor, crearClienteAdmin } from '@/lib/presentismo/supabase-server';
 import { DIAS_SEMANA } from '@/lib/presentismo/constants';
 import FormularioAsignacion from '@/components/presentismo/admin/FormularioAsignacion';
 import BotonEliminarAsignacion from '@/components/presentismo/admin/BotonEliminarAsignacion';
@@ -31,9 +31,12 @@ export default async function DetalleEmpleadoPage({
   if (sesion.perfil.rol !== 'admin') redirect('/presentismo');
 
   const supabase = await crearClienteServidor();
+  // La RLS de perfiles solo permite ver la fila propia (evita recursión); se
+  // busca al empleado con el cliente admin, filtrando por su organización.
+  const admin = crearClienteAdmin();
 
   const [{ data: empleado }, { data: sedesData }, { data: asignacionesData }] = await Promise.all([
-    supabase.from('perfiles').select('*').eq('id', id).single(),
+    admin.from('perfiles').select('*').eq('id', id).eq('organizacion_id', sesion.organizacion.id).single(),
     supabase.from('sedes').select('*').order('nombre'),
     supabase
       .from('empleado_sedes')

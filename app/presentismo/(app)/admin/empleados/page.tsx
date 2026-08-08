@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
-import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+import { crearClienteAdmin } from '@/lib/presentismo/supabase-server';
 import FormularioEmpleado from '@/components/presentismo/admin/FormularioEmpleado';
 import type { Perfil } from '@/lib/presentismo/database.types';
 
@@ -16,10 +16,14 @@ export default async function EmpleadosPage() {
   if (!sesion) return null;
   if (sesion.perfil.rol !== 'admin') redirect('/presentismo');
 
-  const supabase = await crearClienteServidor();
-  const { data } = await supabase
+  // La RLS de perfiles solo permite ver la fila propia (evita recursión); el
+  // listado de todo el equipo se hace con el cliente admin, ya filtrado a la
+  // organización del que pidió la página (verificada arriba como admin).
+  const admin = crearClienteAdmin();
+  const { data } = await admin
     .from('perfiles')
     .select('*')
+    .eq('organizacion_id', sesion.organizacion.id)
     .order('nombre_completo');
   const empleados = (data ?? []) as Perfil[];
 

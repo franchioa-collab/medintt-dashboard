@@ -106,6 +106,7 @@ create or replace function auth_organizacion_id()
 returns uuid
 language sql stable security definer
 set search_path = public
+set row_security = off
 as $$
   select organizacion_id from perfiles where id = auth.uid();
 $$;
@@ -114,6 +115,7 @@ create or replace function auth_rol()
 returns rol_usuario
 language sql stable security definer
 set search_path = public
+set row_security = off
 as $$
   select rol from perfiles where id = auth.uid();
 $$;
@@ -147,24 +149,17 @@ alter table perfiles enable row level security;
 create policy "ver mi propio perfil" on perfiles
   for select using (id = auth.uid());
 
-create policy "admin ve perfiles de su organizacion" on perfiles
-  for select using (
-    auth_rol() = 'admin' and organizacion_id = auth_organizacion_id()
-  );
-
-create policy "supervisor ve empleados de sus sedes" on perfiles
-  for select using (
-    auth_rol() = 'supervisor_sede'
-    and organizacion_id = auth_organizacion_id()
-    and exists (
-      select 1 from empleado_sedes es
-      join sedes s on s.id = es.sede_id
-      where es.empleado_id = perfiles.id and s.supervisor_id = auth.uid()
-    )
-  );
-
--- Nota: alta/edición de usuarios se hace server-side con la service role key
--- (ver app/presentismo/admin/empleados), no hay policy de insert/update para clientes.
+-- No hay policies de "admin ve todo el equipo" / "supervisor ve su sede" acá
+-- a propósito: evaluar auth_rol()/auth_organizacion_id() (que leen de
+-- perfiles) DENTRO de una policy sobre la propia tabla perfiles dispara
+-- "infinite recursion detected in policy for relation perfiles" en Postgres,
+-- incluso siendo funciones SECURITY DEFINER. Esa visibilidad ampliada se
+-- resuelve en el código de la app con el cliente admin (service role),
+-- siempre después de validar el rol del que pide los datos
+-- (ver app/presentismo/admin/empleados y app/presentismo/admin).
+--
+-- Nota: alta/edición de usuarios también se hace server-side con la service
+-- role key, no hay policy de insert/update para clientes.
 
 -- ---------------------------------------------------------------------
 -- RLS: sedes
