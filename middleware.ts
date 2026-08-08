@@ -36,13 +36,17 @@ export async function middleware(request: NextRequest) {
   if (!user && !esApi && pathname.startsWith('/presentismo') && !esRutaPublica) {
     const url = request.nextUrl.clone();
     url.pathname = '/presentismo/login';
-    return NextResponse.redirect(url);
+    const redirectResponse = NextResponse.redirect(url);
+    response.cookies.getAll().forEach((cookie) => redirectResponse.cookies.set(cookie));
+    return redirectResponse;
   }
 
   if (user && esRutaPublica) {
     const url = request.nextUrl.clone();
     url.pathname = '/presentismo';
-    return NextResponse.redirect(url);
+    const redirectResponse = NextResponse.redirect(url);
+    response.cookies.getAll().forEach((cookie) => redirectResponse.cookies.set(cookie));
+    return redirectResponse;
   }
 
   return response;
