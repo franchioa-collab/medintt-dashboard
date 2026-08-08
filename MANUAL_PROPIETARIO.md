@@ -110,3 +110,73 @@ Según el plan original en 3 etapas:
 - Vercel (plan Hobby): pensado para proyectos personales/de bajo tráfico. Si esto se
   vuelve un producto comercial con varios clientes activos, conviene evaluar el plan
   Pro (mejor soporte, sin las limitaciones de uso comercial del plan gratuito).
+
+## 8. Poner el logo de una empresa cliente
+
+Cada empresa cliente puede tener su propio logo en el encabezado de la app (en vez de
+la marca Medintt). Hoy esto se carga a mano, empresa por empresa — no hay todavía un
+botón para que el propio cliente lo suba solo (podría construirse más adelante si hace
+falta).
+
+1. **Conseguí una URL pública de la imagen.** La forma más simple: en Supabase →
+   **Storage**, creá (una sola vez) un bucket público llamado, por ejemplo, `logos`.
+   Subís el archivo del cliente ahí (botón "Upload file") y copiás la **URL pública**
+   que te da Supabase para ese archivo.
+   - Formato recomendado: PNG o SVG, de fondo transparente, más o menos cuadrado
+     (funciona mejor visualmente — se muestra chico, como un ícono, sobre fondo azul
+     oscuro).
+2. **Guardá esa URL en la organización correspondiente** — en el SQL Editor de
+   Supabase:
+   ```sql
+   update organizaciones
+   set logo_url = 'https://LA-URL-QUE-COPIASTE.png'
+   where id = 'ID-DE-LA-ORGANIZACION';
+   ```
+   (Si no tenés a mano el `id` de esa organización, `select id, nombre from
+   organizaciones;` te lo muestra.)
+3. Listo — no hace falta redeploy ni tocar código. La próxima vez que alguien de esa
+   empresa entre a la app, ya va a ver su logo en el encabezado en lugar del nombre
+   "Medintt · Presentismo".
+
+Para sacarle el logo a una empresa (volver a la marca Medintt), el mismo `update` pero
+con `logo_url = null`.
+
+## 9. Vender el presentismo como producto aparte (dominio propio)
+
+Hoy el presentismo vive en el mismo dominio que el dashboard de salud ocupacional
+(`medintt-dashboard-pi.vercel.app/presentismo`). Eso está bien mientras es un módulo
+interno de Medintt, pero si en algún momento querés venderlo como un producto
+independiente — con su propia marca y dirección, sin ningún rastro del dashboard de
+salud ocupacional — hace falta armar esto:
+
+1. **Conseguir un dominio.** Puede ser uno nuevo que compres (ej. `mipresentismo.com`)
+   o un subdominio de uno que ya tengas (ej. `presentismo.medintt.com`). También es
+   posible arrancar gratis con un segundo dominio `.vercel.app`, ver paso 2.
+
+2. **Crear un segundo proyecto en Vercel**, apuntando al mismo repositorio de GitHub y
+   a la misma rama `main` (Vercel permite tener más de un proyecto sobre el mismo
+   repo). Este proyecto nuevo va a tener su propio dominio — gratis te da uno del tipo
+   `nombre-que-elijas.vercel.app`; si comprás uno propio, se lo conectás desde
+   Project Settings → Domains, igual que hicimos con este.
+
+3. **Cargar las mismas variables de entorno de Supabase** en ese proyecto nuevo
+   (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`,
+   `SUPABASE_SERVICE_ROLE_KEY`) — sigue siendo la misma base de datos, solo cambia
+   dónde se aloja el sitio.
+
+4. **Un ajuste de código (uno solo, chico) para que ese dominio nuevo muestre
+   directamente el presentismo** y no el dashboard de salud ocupacional en la portada.
+   Sin este paso, en el dominio nuevo también quedaría visible el dashboard en `/`
+   (mismo código, las dos partes conviven). La solución es un redirect en
+   `middleware.ts` que, cuando la visita venga del dominio nuevo, mande automáticamente
+   la portada (`/`) a `/presentismo`. Es cuestión de unas pocas líneas — avisame cuando
+   llegue este momento y lo armamos.
+
+5. Con eso, el dominio nuevo queda funcionando como un producto separado — mismos
+   datos y mismo código por debajo, pero de cara al cliente no hay ninguna mención al
+   dashboard de salud ocupacional ni a Medintt más allá de lo que vos decidas mostrar.
+
+**Nota sobre costos**: un segundo proyecto en Vercel no tiene costo extra en el plan
+gratuito (Hobby) siempre que el uso sea bajo — el límite es de tráfico/uso, no de
+cantidad de proyectos. Un dominio propio si lo comprás tiene un costo anual aparte
+(normalmente entre USD 10 y 20 por año, según el dominio).
