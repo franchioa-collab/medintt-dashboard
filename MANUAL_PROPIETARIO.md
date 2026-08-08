@@ -38,7 +38,7 @@ Hoy el alta es manual (así se definió para el arranque del producto). Pasos:
    values ('UID-DEL-USUARIO', 'ID-DE-LA-ORGANIZACION', 'Nombre y Apellido', 'admin');
    ```
 
-4. Pasale a esa persona el link de login (`https://TU-DOMINIO/presentismo/login`), su
+4. Pasale a esa persona el link de login (`https://medintt-dashboard-pi.vercel.app/presentismo/login`), su
    email y la contraseña provisoria. Desde ahí, ella ya puede manejar todo sola: cargar
    sedes, dar de alta a sus empleados, etc. — ver `MANUAL_ADMIN_CLIENTE`.
 
