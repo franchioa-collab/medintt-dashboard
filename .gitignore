@@ -27,6 +27,7 @@ Thumbs.db
 
 # Build
 .turbo
+*.tsbuildinfo
 
 # Test
 coverage

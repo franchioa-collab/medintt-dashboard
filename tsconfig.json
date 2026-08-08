@@ -39,6 +39,7 @@
     "components/**/*.tsx",
     "lib/**/*.ts",
     "hooks/**/*.ts",
+    "middleware.ts",
     "next-env.d.ts",
     ".next/types/**/*.ts"
   ],

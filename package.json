@@ -9,6 +9,8 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@supabase/ssr": "^0.5.2",
+    "@supabase/supabase-js": "^2.45.4",
     "date-fns": "^2.30.0",
     "dotenv": "^17.4.2",
     "googleapis": "^173.0.0",
