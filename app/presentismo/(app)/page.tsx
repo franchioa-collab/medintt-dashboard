@@ -1,9 +1,12 @@
+import { Suspense } from 'react';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
 import { rangoDiaActualISO } from '@/lib/presentismo/fecha';
 import PantallaConsentimiento from '@/components/presentismo/PantallaConsentimiento';
 import PanelMarcado from '@/components/presentismo/PanelMarcado';
 import BadgeResultado from '@/components/presentismo/BadgeResultado';
+import RegistroPush from '@/components/presentismo/RegistroPush';
+import ManejadorChequeo from '@/components/presentismo/ManejadorChequeo';
 import type { Marcacion } from '@/lib/presentismo/database.types';
 
 function formatearHora(iso: string) {
@@ -51,7 +54,13 @@ export default async function PresentismoHomePage() {
         </p>
       </div>
 
+      <Suspense fallback={null}>
+        <ManejadorChequeo />
+      </Suspense>
+
       <PanelMarcado proximaAccion={proximaAccion} />
+
+      <RegistroPush />
 
       {marcaciones.length > 0 && (
         <div className="bg-white rounded-lg shadow-md p-4">

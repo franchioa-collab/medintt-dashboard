@@ -63,6 +63,35 @@ export interface Marcacion {
   created_at: string;
 }
 
+// 'pendiente' = avisado, esperando respuesta. 'confirmado_dentro'/'confirmado_fuera'
+// = el empleado tocó el aviso y se comparó su ubicación contra la sede. 'vencido'
+// = no respondió a tiempo. Solo confirmado_fuera guarda latitud/longitud.
+export type EstadoChequeo = 'pendiente' | 'confirmado_dentro' | 'confirmado_fuera' | 'vencido';
+
+export interface PushSubscriptionRow {
+  id: string;
+  empleado_id: string;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  created_at: string;
+}
+
+export interface ChequeoUbicacion {
+  id: string;
+  empleado_id: string;
+  organizacion_id: string;
+  sede_id: string | null;
+  enviado_en: string;
+  vence_en: string;
+  respondido_en: string | null;
+  estado: EstadoChequeo;
+  latitud: number | null;
+  longitud: number | null;
+  distancia_metros: number | null;
+  created_at: string;
+}
+
 export interface Database {
   public: {
     Tables: {
@@ -71,6 +100,16 @@ export interface Database {
       sedes: { Row: Sede; Insert: Partial<Sede>; Update: Partial<Sede> };
       empleado_sedes: { Row: EmpleadoSede; Insert: Partial<EmpleadoSede>; Update: Partial<EmpleadoSede> };
       marcaciones: { Row: Marcacion; Insert: Partial<Marcacion>; Update: Partial<Marcacion> };
+      push_subscriptions: {
+        Row: PushSubscriptionRow;
+        Insert: Partial<PushSubscriptionRow>;
+        Update: Partial<PushSubscriptionRow>;
+      };
+      chequeos_ubicacion: {
+        Row: ChequeoUbicacion;
+        Insert: Partial<ChequeoUbicacion>;
+        Update: Partial<ChequeoUbicacion>;
+      };
     };
   };
 }
