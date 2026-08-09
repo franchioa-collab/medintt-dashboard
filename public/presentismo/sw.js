@@ -25,15 +25,11 @@ self.addEventListener('notificationclick', (event) => {
   const chequeoId = event.notification.data?.chequeoId ?? '';
   const url = `/presentismo?chequeo=${encodeURIComponent(chequeoId)}`;
 
-  event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
-      for (const client of clientList) {
-        if ('focus' in client) {
-          client.navigate(url);
-          return client.focus();
-        }
-      }
-      return self.clients.openWindow(url);
-    })
-  );
+  // clients.openWindow() directo: es el patrón que Chrome soporta de forma
+  // confiable. La alternativa de buscar una pestaña abierta con matchAll() y
+  // navegarla pierde la activación de usuario del click en algunas versiones
+  // de Chrome/Android y falla en silencio (el aviso se cierra pero no pasa
+  // nada). Chrome de todos modos enfoca una pestaña existente de este origen
+  // cuando puede, así que no hace falta buscarla a mano.
+  event.waitUntil(self.clients.openWindow(url));
 });
