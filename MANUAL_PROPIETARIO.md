@@ -19,31 +19,39 @@ para el administrador de cada empresa cliente).
 
 ## 2. Dar de alta una empresa cliente nueva
 
-Hoy el alta es manual (así se definió para el arranque del producto). Pasos:
+Ya no hace falta tocar Supabase ni escribir SQL para esto — hay una pantalla dedicada,
+exclusiva para tu usuario (rol `super_admin`):
 
-1. **Crear la organización** — en Supabase, SQL Editor:
-   ```sql
-   insert into organizaciones (nombre) values ('Nombre de la empresa cliente')
-   returning id;
-   ```
-   Guardá el `id` que devuelve.
+1. Entrá con tu usuario en `https://medintt-dashboard-pi.vercel.app/presentismo/login`.
+   En el menú vas a ver una opción que no le aparece a nadie más: **"Empresas
+   clientes"**.
+2. Completá el formulario: nombre de la empresa, y nombre + email de la persona que va
+   a ser su primer administrador.
+3. Tocá **"Crear empresa cliente"**. La app crea sola la empresa, crea el usuario, los
+   vincula, y te muestra una contraseña provisoria **una única vez** — copiala antes de
+   salir de la pantalla, no queda guardada en ningún lado para volver a verla.
+4. Pasale a esa persona el link de login, su email y esa contraseña provisoria. Desde
+   ahí, ella ya puede manejar todo sola: cargar sedes, dar de alta a sus empleados, etc.
+   — ver el manual del administrador de cuenta.
 
-2. **Crear el primer usuario admin de esa empresa** — en Supabase, Authentication →
-   Users → Add user → Create new user. Cargá su email y una contraseña provisoria
-   (tildá "Auto Confirm User"). Copiá el `UID` que le asigna Supabase.
+Nadie más que vos ve esta pantalla ni puede crear empresas nuevas — ni siquiera un
+`admin` de una empresa cliente, por más permisos que tenga dentro de la suya.
 
-3. **Vincular ese usuario como admin de la organización**:
-   ```sql
-   insert into perfiles (id, organizacion_id, nombre_completo, rol)
-   values ('UID-DEL-USUARIO', 'ID-DE-LA-ORGANIZACION', 'Nombre y Apellido', 'admin');
-   ```
+### Si alguna vez necesitás hacerlo a mano igual
 
-4. Pasale a esa persona el link de login (`https://medintt-dashboard-pi.vercel.app/presentismo/login`), su
-   email y la contraseña provisoria. Desde ahí, ella ya puede manejar todo sola: cargar
-   sedes, dar de alta a sus empleados, etc. — ver `MANUAL_ADMIN_CLIENTE`.
+Por si la pantalla no está disponible por algún motivo, el proceso manual en Supabase
+sigue funcionando igual que antes:
 
-No hace falta tocar código ni volver a desplegar nada para dar de alta una empresa
-nueva — es 100% datos.
+```sql
+insert into organizaciones (nombre) values ('Nombre de la empresa cliente')
+returning id;
+```
+Después, Authentication → Users → Add user (con "Auto Confirm User" tildado), copiás el
+UID, y:
+```sql
+insert into perfiles (id, organizacion_id, nombre_completo, rol)
+values ('UID-DEL-USUARIO', 'ID-DE-LA-ORGANIZACION', 'Nombre y Apellido', 'admin');
+```
 
 ## 3. Dónde vive cada cosa (accesos)
 
