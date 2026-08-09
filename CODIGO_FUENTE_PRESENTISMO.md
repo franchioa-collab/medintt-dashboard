@@ -1,9 +1,9 @@
 # Código fuente completo — Módulo de Presentismo
 
 Este documento junta, en un solo archivo, el código completo del módulo de
-presentismo (Etapa 1) tal como está desplegado en producción a la fecha de
-este documento. Sirve como respaldo de referencia y como material de consulta
-para replicarlo o modificarlo.
+presentismo (Etapa 1 + Etapa 2) tal como está desplegado en producción a la
+fecha de este documento. Sirve como respaldo de referencia y como material de
+consulta para replicarlo o modificarlo.
 
 **Importante**: la copia viva y actualizada del código está en el repositorio
 de GitHub (`franchioa-collab/medintt-dashboard`, rama `main`). Este documento
@@ -12,18 +12,43 @@ queda desactualizado. Para trabajar sobre el código real (agregar una función,
 corregir un bug, etc.), siempre hay que partir del repositorio, no de este
 documento.
 
+## Qué incluye esta versión
+
+Respecto de la primera versión de este documento (solo Etapa 1), esta
+actualización agrega todo lo construido en la Etapa 2 — chequeos periódicos
+por notificación push durante la jornada laboral:
+
+- `lib/presentismo/push.ts` — envío de notificaciones push (VAPID/web-push).
+- `hooks/usePush.ts` y `components/presentismo/RegistroPush.tsx` — alta de
+  suscripción push del lado del empleado.
+- `public/presentismo/sw.js` — service worker que recibe y muestra el push.
+- `app/presentismo/api/push/suscribir/route.ts` — guarda la suscripción.
+- `app/presentismo/api/cron/enviar-chequeos/route.ts` — disparada cada hora
+  por `pg_cron` en Supabase; decide a quién avisar y envía el push.
+- `app/presentismo/api/chequeo/[id]/responder/route.ts` y
+  `components/presentismo/ManejadorChequeo.tsx` — el empleado confirma su
+  ubicación al tocar la notificación.
+- Soporte de `super_admin`: `app/presentismo/api/superadmin/clientes/route.ts`,
+  `app/presentismo/(app)/superadmin/clientes/page.tsx` y
+  `components/presentismo/superadmin/FormularioNuevoCliente.tsx` — alta de
+  empresas clientes sin tocar SQL a mano.
+- `supabase/schema.sql` ahora incluye las tablas `push_subscriptions` y
+  `chequeos_ubicacion`, el tipo `estado_chequeo`, la función
+  `responder_chequeo` y el rol `super_admin`.
+
 ## Cómo está organizado
 
 - `app/presentismo/` — páginas y rutas de API del módulo (Next.js App Router).
 - `components/presentismo/` — componentes de interfaz reutilizables.
 - `lib/presentismo/` — lógica de negocio, tipos y clientes de Supabase.
-- `hooks/useUbicacionActual.ts` — hook de geolocalización del navegador.
+- `hooks/` — hooks de geolocalización y notificaciones push del navegador.
 - `middleware.ts` — protección de rutas y manejo de sesión (raíz del proyecto).
 - `supabase/schema.sql` — esquema completo de base de datos y seguridad (RLS).
-- `public/presentismo/` — ícono de la PWA.
+- `public/presentismo/` — ícono de la PWA y service worker.
 
 Además de este módulo, el proyecto completo depende de:
-- `package.json` (dependencias) — ver el repositorio.
+- `package.json` (dependencias) — ver el repositorio. Se sumó `web-push` para
+  el envío de notificaciones de la Etapa 2.
 - Variables de entorno documentadas en `.env.local.example` y en
   `PRESENTISMO_SETUP.md`.
 
@@ -44,7 +69,9 @@ create extension if not exists "pgcrypto";
 -- ---------------------------------------------------------------------
 -- Tipos
 -- ---------------------------------------------------------------------
-create type rol_usuario as enum ('admin', 'supervisor_sede', 'empleado');
+-- 'super_admin' es el dueño de la plataforma (Medintt): da de alta empresas
+-- clientes nuevas. 'admin' administra una sola empresa cliente puntual.
+create type rol_usuario as enum ('super_admin', 'admin', 'supervisor_sede', 'empleado');
 create type tipo_marcacion as enum ('ingreso', 'egreso');
 create type resultado_validacion as enum ('dentro_de_zona', 'fuera_de_zona');
 
@@ -134,6 +161,48 @@ create index idx_marcaciones_empleado on marcaciones(empleado_id, timestamp_marc
 create index idx_marcaciones_organizacion on marcaciones(organizacion_id, timestamp_marcacion desc);
 
 -- ---------------------------------------------------------------------
+-- Suscripciones push (una fila por dispositivo/navegador del empleado)
+-- ---------------------------------------------------------------------
+create table push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  empleado_id uuid not null references perfiles(id) on delete cascade,
+  endpoint text not null unique,
+  p256dh text not null,
+  auth text not null,
+  created_at timestamptz not null default now()
+);
+
+create index idx_push_subscriptions_empleado on push_subscriptions(empleado_id);
+
+-- ---------------------------------------------------------------------
+-- Chequeos de ubicación periódicos durante la jornada (Etapa 2).
+-- Se crea uno por aviso push enviado; el empleado lo responde al tocar la
+-- notificación. Las coordenadas SOLO se guardan si quedó fuera de zona —
+-- si confirma dentro de zona, o no responde a tiempo, nunca se guarda
+-- ninguna ubicación, solo el resultado.
+-- ---------------------------------------------------------------------
+create type estado_chequeo as enum ('pendiente', 'confirmado_dentro', 'confirmado_fuera', 'vencido');
+
+create table chequeos_ubicacion (
+  id uuid primary key default gen_random_uuid(),
+  empleado_id uuid not null references perfiles(id) on delete cascade,
+  organizacion_id uuid not null references organizaciones(id) on delete cascade,
+  sede_id uuid references sedes(id) on delete set null,
+  enviado_en timestamptz not null default now(),
+  vence_en timestamptz not null,
+  respondido_en timestamptz,
+  estado estado_chequeo not null default 'pendiente',
+  latitud double precision,
+  longitud double precision,
+  distancia_metros double precision,
+  created_at timestamptz not null default now()
+);
+
+create index idx_chequeos_empleado on chequeos_ubicacion(empleado_id, enviado_en desc);
+create index idx_chequeos_organizacion on chequeos_ubicacion(organizacion_id, enviado_en desc);
+create index idx_chequeos_pendientes on chequeos_ubicacion(estado, vence_en) where estado = 'pendiente';
+
+-- ---------------------------------------------------------------------
 -- Funciones auxiliares (security definer) para evitar recursión de RLS
 -- ---------------------------------------------------------------------
 create or replace function auth_organizacion_id()
@@ -166,6 +235,61 @@ as $$
 $$;
 
 grant execute on function aceptar_consentimiento() to authenticated;
+
+-- Responde un chequeo de ubicación periódico (Etapa 2): calcula la
+-- distancia server-side (no confía en nada que mande el cliente más que
+-- las coordenadas crudas) y decide el resultado. Solo guarda latitud y
+-- longitud si el empleado quedó fuera de zona; si está dentro, o el
+-- chequeo no le pertenece o ya fue respondido, no graba ubicación.
+create or replace function responder_chequeo(chequeo_id uuid, lat double precision, lon double precision)
+returns chequeos_ubicacion
+language plpgsql security definer
+set search_path = public
+as $$
+declare
+  fila chequeos_ubicacion;
+  sede_lat double precision;
+  sede_lon double precision;
+  sede_radio integer;
+  dist double precision;
+begin
+  select * into fila from chequeos_ubicacion
+    where id = chequeo_id and empleado_id = auth.uid() and estado = 'pendiente';
+
+  if not found then
+    raise exception 'chequeo_no_encontrado';
+  end if;
+
+  select latitud, longitud, radio_metros into sede_lat, sede_lon, sede_radio
+    from sedes where id = fila.sede_id;
+
+  if sede_lat is null then
+    raise exception 'sede_no_encontrada';
+  end if;
+
+  dist := 2 * 6371000 * asin(sqrt(
+    power(sin(radians(lat - sede_lat) / 2), 2) +
+    cos(radians(sede_lat)) * cos(radians(lat)) * power(sin(radians(lon - sede_lon) / 2), 2)
+  ));
+
+  if dist <= sede_radio then
+    update chequeos_ubicacion
+      set estado = 'confirmado_dentro', respondido_en = now(), distancia_metros = dist
+      where id = chequeo_id
+      returning * into fila;
+  else
+    update chequeos_ubicacion
+      set estado = 'confirmado_fuera', respondido_en = now(), distancia_metros = dist,
+          latitud = lat, longitud = lon
+      where id = chequeo_id
+      returning * into fila;
+  end if;
+
+  return fila;
+end;
+$$;
+
+grant execute on function responder_chequeo(uuid, double precision, double precision) to authenticated;
 
 -- ---------------------------------------------------------------------
 -- RLS: organizaciones
@@ -204,8 +328,8 @@ create policy "ver sedes de mi organizacion" on sedes
   for select using (organizacion_id = auth_organizacion_id());
 
 create policy "admin administra sedes de su organizacion" on sedes
-  for all using (auth_rol() = 'admin' and organizacion_id = auth_organizacion_id())
-  with check (auth_rol() = 'admin' and organizacion_id = auth_organizacion_id());
+  for all using (auth_rol() in ('admin', 'super_admin') and organizacion_id = auth_organizacion_id())
+  with check (auth_rol() in ('admin', 'super_admin') and organizacion_id = auth_organizacion_id());
 
 -- ---------------------------------------------------------------------
 -- RLS: empleado_sedes
@@ -224,12 +348,12 @@ create policy "supervisor ve asignaciones de sus sedes" on empleado_sedes
 
 create policy "admin administra asignaciones de su organizacion" on empleado_sedes
   for all using (
-    auth_rol() = 'admin' and exists (
+    auth_rol() in ('admin', 'super_admin') and exists (
       select 1 from perfiles p where p.id = empleado_sedes.empleado_id and p.organizacion_id = auth_organizacion_id()
     )
   )
   with check (
-    auth_rol() = 'admin' and exists (
+    auth_rol() in ('admin', 'super_admin') and exists (
       select 1 from perfiles p where p.id = empleado_sedes.empleado_id and p.organizacion_id = auth_organizacion_id()
     )
   );
@@ -246,7 +370,7 @@ create policy "empleado inserta sus propias marcaciones" on marcaciones
   for insert with check (empleado_id = auth.uid() and organizacion_id = auth_organizacion_id());
 
 create policy "admin ve marcaciones de su organizacion" on marcaciones
-  for select using (auth_rol() = 'admin' and organizacion_id = auth_organizacion_id());
+  for select using (auth_rol() in ('admin', 'super_admin') and organizacion_id = auth_organizacion_id());
 
 create policy "supervisor ve marcaciones de empleados de sus sedes" on marcaciones
   for select using (
@@ -254,13 +378,62 @@ create policy "supervisor ve marcaciones de empleados de sus sedes" on marcacion
       select 1 from sedes s where s.id = marcaciones.sede_id and s.supervisor_id = auth.uid()
     )
   );
-```
 
----
+-- ---------------------------------------------------------------------
+-- RLS: push_subscriptions
+-- ---------------------------------------------------------------------
+alter table push_subscriptions enable row level security;
+
+create policy "empleado administra sus propias suscripciones push" on push_subscriptions
+  for all using (empleado_id = auth.uid())
+  with check (empleado_id = auth.uid());
+
+-- ---------------------------------------------------------------------
+-- RLS: chequeos_ubicacion (inmutables desde el cliente salvo por la
+-- función responder_chequeo(); no hay policy de insert/update para
+-- clientes — los crea el cron con la service role key).
+-- ---------------------------------------------------------------------
+alter table chequeos_ubicacion enable row level security;
+
+create policy "empleado ve sus propios chequeos" on chequeos_ubicacion
+  for select using (empleado_id = auth.uid());
+
+create policy "admin ve chequeos de su organizacion" on chequeos_ubicacion
+  for select using (auth_rol() in ('admin', 'super_admin') and organizacion_id = auth_organizacion_id());
+
+create policy "supervisor ve chequeos de empleados de sus sedes" on chequeos_ubicacion
+  for select using (
+    auth_rol() = 'supervisor_sede' and exists (
+      select 1 from sedes s where s.id = chequeos_ubicacion.sede_id and s.supervisor_id = auth.uid()
+    )
+  );
+
+-- ---------------------------------------------------------------------
+-- Tarea programada (Etapa 2): dispara el envío de chequeos cada hora.
+-- No se ejecuta como parte de este archivo porque necesita el dominio de
+-- producción y el secreto real de CRON_SECRET — correr una sola vez,
+-- reemplazando esos dos valores, después de tener la app desplegada.
+-- Ver PRESENTISMO_SETUP.md.
+-- ---------------------------------------------------------------------
+-- create extension if not exists pg_cron;
+-- create extension if not exists pg_net;
+--
+-- select cron.schedule(
+--   'enviar-chequeos-presentismo',
+--   '0 * * * *', -- todas las horas, en punto
+--   $$
+--   select net.http_post(
+--     url := 'https://TU-DOMINIO/presentismo/api/cron/enviar-chequeos',
+--     headers := jsonb_build_object('Authorization', 'Bearer TU_CRON_SECRET', 'Content-Type', 'application/json'),
+--     body := '{}'::jsonb
+--   );
+--   $$
+-- );
+```
 
 ## `middleware.ts`
 
-```tsx
+```ts
 import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 
@@ -322,11 +495,9 @@ export const config = {
 };
 ```
 
----
-
 ## `hooks/useUbicacionActual.ts`
 
-```tsx
+```ts
 'use client';
 
 import { useCallback, useState } from 'react';
@@ -396,16 +567,97 @@ export function useUbicacionActual() {
 }
 ```
 
----
+## `hooks/usePush.ts`
+
+```ts
+'use client';
+
+import { useCallback, useState } from 'react';
+
+function urlBase64ToUint8Array(base64: string): Uint8Array {
+  const padding = '='.repeat((4 - (base64.length % 4)) % 4);
+  const base64Seguro = (base64 + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = window.atob(base64Seguro);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+export type EstadoPush = 'no_soportado' | 'inactivo' | 'activando' | 'activo' | 'rechazado' | 'error';
+
+/** Registra el service worker y suscribe al empleado a los avisos push de chequeo. */
+export function usePush() {
+  const [estado, setEstado] = useState<EstadoPush>('inactivo');
+
+  const activar = useCallback(async (): Promise<boolean> => {
+    if (
+      typeof window === 'undefined' ||
+      !('serviceWorker' in navigator) ||
+      !('PushManager' in window) ||
+      !('Notification' in window)
+    ) {
+      setEstado('no_soportado');
+      return false;
+    }
+
+    setEstado('activando');
+
+    try {
+      const permiso = await Notification.requestPermission();
+      if (permiso !== 'granted') {
+        setEstado('rechazado');
+        return false;
+      }
+
+      const registro = await navigator.serviceWorker.register('/presentismo/sw.js');
+      await navigator.serviceWorker.ready;
+
+      const suscripcionExistente = await registro.pushManager.getSubscription();
+      const suscripcion =
+        suscripcionExistente ??
+        (await registro.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(
+            process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!
+          ) as BufferSource,
+        }));
+
+      const json = suscripcion.toJSON();
+      const res = await fetch('/presentismo/api/push/suscribir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          endpoint: json.endpoint,
+          p256dh: json.keys?.p256dh,
+          auth: json.keys?.auth,
+        }),
+      });
+
+      if (!res.ok) {
+        setEstado('error');
+        return false;
+      }
+
+      setEstado('activo');
+      return true;
+    } catch {
+      setEstado('error');
+      return false;
+    }
+  }, []);
+
+  return { estado, activar };
+}
+```
 
 ## `lib/presentismo/database.types.ts`
 
-```tsx
+```ts
 // Tipos escritos a mano, en espejo de supabase/schema.sql.
 // Si el esquema cambia en Supabase, actualizar este archivo (o regenerarlo con
 // `supabase gen types typescript` una vez que el proyecto esté creado).
 
-export type RolUsuario = 'admin' | 'supervisor_sede' | 'empleado';
+// 'super_admin' es el dueño de la plataforma (Medintt): da de alta empresas
+// clientes nuevas. 'admin' administra una sola empresa cliente puntual.
+export type RolUsuario = 'super_admin' | 'admin' | 'supervisor_sede' | 'empleado';
 export type TipoMarcacion = 'ingreso' | 'egreso';
 export type ResultadoValidacion = 'dentro_de_zona' | 'fuera_de_zona';
 
@@ -464,6 +716,35 @@ export interface Marcacion {
   created_at: string;
 }
 
+// 'pendiente' = avisado, esperando respuesta. 'confirmado_dentro'/'confirmado_fuera'
+// = el empleado tocó el aviso y se comparó su ubicación contra la sede. 'vencido'
+// = no respondió a tiempo. Solo confirmado_fuera guarda latitud/longitud.
+export type EstadoChequeo = 'pendiente' | 'confirmado_dentro' | 'confirmado_fuera' | 'vencido';
+
+export interface PushSubscriptionRow {
+  id: string;
+  empleado_id: string;
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  created_at: string;
+}
+
+export interface ChequeoUbicacion {
+  id: string;
+  empleado_id: string;
+  organizacion_id: string;
+  sede_id: string | null;
+  enviado_en: string;
+  vence_en: string;
+  respondido_en: string | null;
+  estado: EstadoChequeo;
+  latitud: number | null;
+  longitud: number | null;
+  distancia_metros: number | null;
+  created_at: string;
+}
+
 export interface Database {
   public: {
     Tables: {
@@ -472,16 +753,24 @@ export interface Database {
       sedes: { Row: Sede; Insert: Partial<Sede>; Update: Partial<Sede> };
       empleado_sedes: { Row: EmpleadoSede; Insert: Partial<EmpleadoSede>; Update: Partial<EmpleadoSede> };
       marcaciones: { Row: Marcacion; Insert: Partial<Marcacion>; Update: Partial<Marcacion> };
+      push_subscriptions: {
+        Row: PushSubscriptionRow;
+        Insert: Partial<PushSubscriptionRow>;
+        Update: Partial<PushSubscriptionRow>;
+      };
+      chequeos_ubicacion: {
+        Row: ChequeoUbicacion;
+        Insert: Partial<ChequeoUbicacion>;
+        Update: Partial<ChequeoUbicacion>;
+      };
     };
   };
 }
 ```
 
----
-
 ## `lib/presentismo/types.ts`
 
-```tsx
+```ts
 export type EstadoPresentismo = 'a_horario' | 'tarde' | 'fuera_de_zona' | 'ausente';
 
 export interface CoordenadasActuales {
@@ -497,11 +786,11 @@ export type ErrorGeolocalizacion =
   | 'no_soportado';
 ```
 
----
-
 ## `lib/presentismo/constants.ts`
 
-```tsx
+```ts
+import type { RolUsuario } from './database.types';
+
 export const TOLERANCIA_TARDE_MINUTOS = 15;
 
 export const RADIO_METROS_DEFAULT = 400;
@@ -517,13 +806,15 @@ export const DIAS_SEMANA = [
 ] as const;
 
 export const DIAS_HABILES_DEFAULT = [1, 2, 3, 4, 5];
-```
 
----
+// super_admin puede hacer todo lo que un admin de empresa puede, además de
+// dar de alta empresas clientes nuevas (ver /presentismo/superadmin).
+export const ROLES_ADMIN_EMPRESA: readonly RolUsuario[] = ['admin', 'super_admin'];
+```
 
 ## `lib/presentismo/fecha.ts`
 
-```tsx
+```ts
 import { ZONA_HORARIA_DEFAULT } from './geo';
 
 /** Fecha en formato YYYY-MM-DD según la zona horaria indicada. */
@@ -554,11 +845,9 @@ export function rangoDiaActualISO(
 }
 ```
 
----
-
 ## `lib/presentismo/geo.ts`
 
-```tsx
+```ts
 import type { EmpleadoSede, Sede } from './database.types';
 import { TOLERANCIA_TARDE_MINUTOS } from './constants';
 
@@ -705,11 +994,65 @@ export function evaluarUbicacionContraSedes(
 }
 ```
 
----
+## `lib/presentismo/push.ts`
+
+```ts
+import webpush from 'web-push';
+
+let configurado = false;
+
+function asegurarConfiguracion() {
+  if (configurado) return;
+  webpush.setVapidDetails(
+    process.env.VAPID_SUBJECT!,
+    process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!,
+    process.env.VAPID_PRIVATE_KEY!
+  );
+  configurado = true;
+}
+
+export interface SuscripcionPush {
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+}
+
+export interface ResultadoEnvioPush {
+  ok: boolean;
+  /** true si la suscripción ya no es válida y conviene borrarla (410/404). */
+  expirada: boolean;
+}
+
+/** Manda una notificación push a un dispositivo. No lanza si falla el envío. */
+export async function enviarPush(
+  suscripcion: SuscripcionPush,
+  payload: { titulo: string; cuerpo: string; chequeoId: string }
+): Promise<ResultadoEnvioPush> {
+  asegurarConfiguracion();
+
+  try {
+    await webpush.sendNotification(
+      {
+        endpoint: suscripcion.endpoint,
+        keys: { p256dh: suscripcion.p256dh, auth: suscripcion.auth },
+      },
+      JSON.stringify({
+        title: payload.titulo,
+        body: payload.cuerpo,
+        chequeoId: payload.chequeoId,
+      })
+    );
+    return { ok: true, expirada: false };
+  } catch (error) {
+    const status = (error as { statusCode?: number }).statusCode;
+    return { ok: false, expirada: status === 404 || status === 410 };
+  }
+}
+```
 
 ## `lib/presentismo/sesion.ts`
 
-```tsx
+```ts
 import { cache } from 'react';
 import { crearClienteServidor } from './supabase-server';
 import type { Organizacion, Perfil } from './database.types';
@@ -752,11 +1095,9 @@ export const obtenerSesionActual = cache(async (): Promise<SesionActual | null> 
 });
 ```
 
----
-
 ## `lib/presentismo/supabase-browser.ts`
 
-```tsx
+```ts
 import { createBrowserClient } from '@supabase/ssr';
 
 export function crearClienteBrowser() {
@@ -767,11 +1108,9 @@ export function crearClienteBrowser() {
 }
 ```
 
----
-
 ## `lib/presentismo/supabase-server.ts`
 
-```tsx
+```ts
 import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { createClient } from '@supabase/supabase-js';
@@ -820,8 +1159,6 @@ export function crearClienteAdmin() {
 }
 ```
 
----
-
 ## `components/presentismo/BadgeResultado.tsx`
 
 ```tsx
@@ -851,8 +1188,6 @@ export default function BadgeResultado({
 }
 ```
 
----
-
 ## `components/presentismo/EncabezadoOrganizacion.tsx`
 
 ```tsx
@@ -860,6 +1195,7 @@ import type { Organizacion, Perfil } from '@/lib/presentismo/database.types';
 import LogoutButton from './LogoutButton';
 
 const NOMBRES_ROL: Record<Perfil['rol'], string> = {
+  super_admin: 'Administrador general',
   admin: 'Administrador',
   supervisor_sede: 'Supervisor de sede',
   empleado: 'Empleado',
@@ -901,8 +1237,6 @@ export default function EncabezadoOrganizacion({
   );
 }
 ```
-
----
 
 ## `components/presentismo/FormularioCambiarPassword.tsx`
 
@@ -991,8 +1325,6 @@ export default function FormularioCambiarPassword() {
 }
 ```
 
----
-
 ## `components/presentismo/LogoutButton.tsx`
 
 ```tsx
@@ -1019,7 +1351,86 @@ export default function LogoutButton() {
 }
 ```
 
----
+## `components/presentismo/ManejadorChequeo.tsx`
+
+```tsx
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { useUbicacionActual } from '@/hooks/useUbicacionActual';
+
+/**
+ * Cuando el empleado toca el aviso push de chequeo, el service worker abre
+ * /presentismo?chequeo=<id>. Este componente detecta ese parámetro, captura
+ * la ubicación al toque y confirma el chequeo, sin que el empleado tenga que
+ * hacer nada más que tocar el aviso.
+ */
+export default function ManejadorChequeo() {
+  const searchParams = useSearchParams();
+  const chequeoId = searchParams.get('chequeo');
+  const { obtenerUbicacion } = useUbicacionActual();
+  const [estado, setEstado] = useState<'procesando' | 'ok' | 'error' | null>(null);
+  const [mensaje, setMensaje] = useState('');
+
+  useEffect(() => {
+    if (!chequeoId) return;
+    let cancelado = false;
+
+    async function responder() {
+      setEstado('procesando');
+      const { coordenadas } = await obtenerUbicacion();
+      if (cancelado) return;
+
+      if (!coordenadas) {
+        setEstado('error');
+        setMensaje('No pudimos obtener tu ubicación. Activá el GPS y volvé a tocar el aviso.');
+        return;
+      }
+
+      const res = await fetch(`/presentismo/api/chequeo/${chequeoId}/responder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lat: coordenadas.lat, lon: coordenadas.lon }),
+      });
+
+      if (cancelado) return;
+
+      if (!res.ok) {
+        setEstado('error');
+        setMensaje('No pudimos confirmar el chequeo. Puede que ya haya vencido.');
+        return;
+      }
+
+      const { chequeo } = await res.json();
+      setEstado('ok');
+      setMensaje(
+        chequeo.estado === 'confirmado_dentro'
+          ? 'Ubicación confirmada, todo en orden.'
+          : 'Ubicación confirmada — quedó registrado que estabas fuera del área asignada.'
+      );
+    }
+
+    responder();
+    return () => {
+      cancelado = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chequeoId]);
+
+  if (!chequeoId || !estado) return null;
+
+  return (
+    <div
+      className={`rounded-lg shadow-md p-4 text-sm ${
+        estado === 'error' ? 'bg-red-50 text-red-700' : 'bg-celeste/10 text-navy'
+      }`}
+    >
+      {estado === 'procesando' ? 'Confirmando tu ubicación…' : mensaje}
+    </div>
+  );
+}
+```
 
 ## `components/presentismo/NavPresentismo.tsx`
 
@@ -1031,12 +1442,25 @@ import { usePathname } from 'next/navigation';
 import type { RolUsuario } from '@/lib/presentismo/database.types';
 
 const ITEMS: { href: string; label: string; roles: RolUsuario[] }[] = [
-  { href: '/presentismo', label: 'Marcar', roles: ['admin', 'supervisor_sede', 'empleado'] },
-  { href: '/presentismo/historial', label: 'Mi historial', roles: ['admin', 'supervisor_sede', 'empleado'] },
-  { href: '/presentismo/admin', label: 'Presentismo del equipo', roles: ['admin', 'supervisor_sede'] },
-  { href: '/presentismo/admin/sedes', label: 'Sedes', roles: ['admin'] },
-  { href: '/presentismo/admin/empleados', label: 'Empleados', roles: ['admin'] },
-  { href: '/presentismo/cuenta', label: 'Mi cuenta', roles: ['admin', 'supervisor_sede', 'empleado'] },
+  { href: '/presentismo', label: 'Marcar', roles: ['super_admin', 'admin', 'supervisor_sede', 'empleado'] },
+  {
+    href: '/presentismo/historial',
+    label: 'Mi historial',
+    roles: ['super_admin', 'admin', 'supervisor_sede', 'empleado'],
+  },
+  {
+    href: '/presentismo/admin',
+    label: 'Presentismo del equipo',
+    roles: ['super_admin', 'admin', 'supervisor_sede'],
+  },
+  { href: '/presentismo/admin/sedes', label: 'Sedes', roles: ['super_admin', 'admin'] },
+  { href: '/presentismo/admin/empleados', label: 'Empleados', roles: ['super_admin', 'admin'] },
+  { href: '/presentismo/superadmin/clientes', label: 'Empresas clientes', roles: ['super_admin'] },
+  {
+    href: '/presentismo/cuenta',
+    label: 'Mi cuenta',
+    roles: ['super_admin', 'admin', 'supervisor_sede', 'empleado'],
+  },
 ];
 
 export default function NavPresentismo({ rol }: { rol: RolUsuario }) {
@@ -1065,8 +1489,6 @@ export default function NavPresentismo({ rol }: { rol: RolUsuario }) {
   );
 }
 ```
-
----
 
 ## `components/presentismo/PanelMarcado.tsx`
 
@@ -1159,8 +1581,6 @@ export default function PanelMarcado({ proximaAccion }: Props) {
 }
 ```
 
----
-
 ## `components/presentismo/PantallaConsentimiento.tsx`
 
 ```tsx
@@ -1225,7 +1645,68 @@ export default function PantallaConsentimiento() {
 }
 ```
 
----
+## `components/presentismo/RegistroPush.tsx`
+
+```tsx
+'use client';
+
+import { useEffect, useState } from 'react';
+import { usePush } from '@/hooks/usePush';
+
+export default function RegistroPush() {
+  const { estado, activar } = usePush();
+  const [yaActivo, setYaActivo] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelado = false;
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setYaActivo(false);
+      return;
+    }
+    navigator.serviceWorker
+      .getRegistration('/presentismo/')
+      .then((registro) => registro?.pushManager.getSubscription())
+      .then((suscripcion) => {
+        if (!cancelado) setYaActivo(Boolean(suscripcion));
+      })
+      .catch(() => {
+        if (!cancelado) setYaActivo(false);
+      });
+    return () => {
+      cancelado = true;
+    };
+  }, []);
+
+  if (yaActivo === null || yaActivo || estado === 'activo') return null;
+  if (estado === 'no_soportado') return null;
+
+  return (
+    <div className="bg-white rounded-lg shadow-md p-4 space-y-2">
+      <h2 className="text-sm font-bold text-gray-700">Avisos de verificación</h2>
+      <p className="text-sm text-gray-600">
+        Durante tu horario laboral, cada tanto te va a llegar un aviso para confirmar tu
+        ubicación en un toque — nada de mantener la app abierta todo el día.
+      </p>
+      {estado === 'rechazado' && (
+        <p className="text-sm text-red-600">
+          Bloqueaste las notificaciones. Activalas desde la configuración del navegador para
+          este sitio si querés habilitarlo.
+        </p>
+      )}
+      {estado === 'error' && (
+        <p className="text-sm text-red-600">No pudimos activarlo. Probá de nuevo.</p>
+      )}
+      <button
+        onClick={activar}
+        disabled={estado === 'activando'}
+        className="bg-navy text-white rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50"
+      >
+        {estado === 'activando' ? 'Activando…' : 'Activar avisos'}
+      </button>
+    </div>
+  );
+}
+```
 
 ## `components/presentismo/admin/BotonEliminarAsignacion.tsx`
 
@@ -1259,8 +1740,6 @@ export default function BotonEliminarAsignacion({ asignacionId }: { asignacionId
   );
 }
 ```
-
----
 
 ## `components/presentismo/admin/FormularioAsignacion.tsx`
 
@@ -1407,8 +1886,6 @@ export default function FormularioAsignacion({
 }
 ```
 
----
-
 ## `components/presentismo/admin/FormularioEmpleado.tsx`
 
 ```tsx
@@ -1530,8 +2007,6 @@ export default function FormularioEmpleado() {
   );
 }
 ```
-
----
 
 ## `components/presentismo/admin/FormularioSede.tsx`
 
@@ -1666,8 +2141,6 @@ export default function FormularioSede() {
 }
 ```
 
----
-
 ## `components/presentismo/admin/TogglesSupervisorSede.tsx`
 
 ```tsx
@@ -1723,7 +2196,121 @@ export default function TogglesSupervisorSede({
 }
 ```
 
----
+## `components/presentismo/superadmin/FormularioNuevoCliente.tsx`
+
+```tsx
+'use client';
+
+import { useState, type FormEvent } from 'react';
+import { useRouter } from 'next/navigation';
+
+export default function FormularioNuevoCliente() {
+  const router = useRouter();
+  const [nombreEmpresa, setNombreEmpresa] = useState('');
+  const [nombreAdmin, setNombreAdmin] = useState('');
+  const [emailAdmin, setEmailAdmin] = useState('');
+  const [enviando, setEnviando] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [resultado, setResultado] = useState<{ passwordTemporal: string; nombreEmpresa: string } | null>(
+    null
+  );
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    setEnviando(true);
+    setError(null);
+    setResultado(null);
+
+    const res = await fetch('/presentismo/api/superadmin/clientes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nombreEmpresa, nombreAdmin, emailAdmin }),
+    });
+
+    setEnviando(false);
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      setError(
+        data?.error === 'email_en_uso'
+          ? 'Ese email ya está registrado.'
+          : 'No pudimos crear la empresa. Revisá los datos.'
+      );
+      return;
+    }
+
+    const { passwordTemporal } = await res.json();
+    setResultado({ passwordTemporal, nombreEmpresa });
+    setNombreEmpresa('');
+    setNombreAdmin('');
+    setEmailAdmin('');
+    router.refresh();
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="bg-white rounded-lg shadow-md p-4 space-y-3">
+      <h2 className="text-sm font-bold text-gray-700">Nueva empresa cliente</h2>
+
+      <div>
+        <label className="block text-xs font-medium text-gray-600 mb-1">Nombre de la empresa</label>
+        <input
+          required
+          value={nombreEmpresa}
+          onChange={(e) => setNombreEmpresa(e.target.value)}
+          placeholder="Ej. Acme S.A."
+          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+        />
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-gray-600 mb-1">
+          Nombre completo del primer administrador
+        </label>
+        <input
+          required
+          value={nombreAdmin}
+          onChange={(e) => setNombreAdmin(e.target.value)}
+          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+        />
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-gray-600 mb-1">Email de ese administrador</label>
+        <input
+          required
+          type="email"
+          value={emailAdmin}
+          onChange={(e) => setEmailAdmin(e.target.value)}
+          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+        />
+      </div>
+
+      {error && <p className="text-sm text-red-600">{error}</p>}
+
+      {resultado && (
+        <div className="bg-amarillo/20 border border-amarillo rounded-md p-3 text-sm text-gray-800">
+          <p className="font-medium">Empresa &ldquo;{resultado.nombreEmpresa}&rdquo; creada.</p>
+          <p>
+            Contraseña temporal: <span className="font-mono font-bold">{resultado.passwordTemporal}</span>
+          </p>
+          <p className="text-xs text-gray-600 mt-1">
+            Compartísela de forma segura al administrador de esa empresa, junto con el link de
+            ingreso. Puede cambiarla desde su cuenta.
+          </p>
+        </div>
+      )}
+
+      <button
+        type="submit"
+        disabled={enviando}
+        className="bg-navy text-white rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50"
+      >
+        {enviando ? 'Creando…' : 'Crear empresa cliente'}
+      </button>
+    </form>
+  );
+}
+```
 
 ## `app/presentismo/layout.tsx`
 
@@ -1762,8 +2349,6 @@ export default function PresentismoRootLayout({
   );
 }
 ```
-
----
 
 ## `app/presentismo/login/page.tsx`
 
@@ -1852,11 +2437,9 @@ export default function LoginPage() {
 }
 ```
 
----
-
 ## `app/presentismo/manifest.webmanifest/route.ts`
 
-```tsx
+```ts
 import { NextResponse } from 'next/server';
 
 // Next.js 14 no soporta el archivo especial `manifest.ts` anidado dentro de un
@@ -1881,8 +2464,6 @@ export function GET() {
   );
 }
 ```
-
----
 
 ## `app/presentismo/(app)/layout.tsx`
 
@@ -1910,17 +2491,18 @@ export default async function PresentismoAppLayout({
 }
 ```
 
----
-
 ## `app/presentismo/(app)/page.tsx`
 
 ```tsx
+import { Suspense } from 'react';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
 import { rangoDiaActualISO } from '@/lib/presentismo/fecha';
 import PantallaConsentimiento from '@/components/presentismo/PantallaConsentimiento';
 import PanelMarcado from '@/components/presentismo/PanelMarcado';
 import BadgeResultado from '@/components/presentismo/BadgeResultado';
+import RegistroPush from '@/components/presentismo/RegistroPush';
+import ManejadorChequeo from '@/components/presentismo/ManejadorChequeo';
 import type { Marcacion } from '@/lib/presentismo/database.types';
 
 function formatearHora(iso: string) {
@@ -1968,7 +2550,13 @@ export default async function PresentismoHomePage() {
         </p>
       </div>
 
+      <Suspense fallback={null}>
+        <ManejadorChequeo />
+      </Suspense>
+
       <PanelMarcado proximaAccion={proximaAccion} />
+
+      <RegistroPush />
 
       {marcaciones.length > 0 && (
         <div className="bg-white rounded-lg shadow-md p-4">
@@ -1989,8 +2577,6 @@ export default async function PresentismoHomePage() {
   );
 }
 ```
-
----
 
 ## `app/presentismo/(app)/historial/page.tsx`
 
@@ -2069,8 +2655,6 @@ export default async function HistorialPage() {
 }
 ```
 
----
-
 ## `app/presentismo/(app)/cuenta/page.tsx`
 
 ```tsx
@@ -2086,20 +2670,21 @@ export default function CuentaPage() {
 }
 ```
 
----
-
 ## `app/presentismo/(app)/admin/page.tsx`
 
 ```tsx
 import { redirect } from 'next/navigation';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor, crearClienteAdmin } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
+import { rangoDiaActualISO } from '@/lib/presentismo/fecha';
 import BadgeResultado from '@/components/presentismo/BadgeResultado';
-import type { Marcacion, Sede } from '@/lib/presentismo/database.types';
+import type { ChequeoUbicacion, Marcacion, Sede } from '@/lib/presentismo/database.types';
 
 const LIMITE = 100;
 
 type MarcacionConSede = Marcacion & { sede: Pick<Sede, 'nombre'> | null };
+type ChequeoConSede = ChequeoUbicacion & { sede: Pick<Sede, 'nombre'> | null };
 
 function formatearFechaHora(iso: string) {
   return new Date(iso).toLocaleString('es-AR', {
@@ -2114,7 +2699,7 @@ function formatearFechaHora(iso: string) {
 export default async function EquipoPage() {
   const sesion = await obtenerSesionActual();
   if (!sesion) return null;
-  if (sesion.perfil.rol !== 'admin' && sesion.perfil.rol !== 'supervisor_sede') {
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol) && sesion.perfil.rol !== 'supervisor_sede') {
     redirect('/presentismo');
   }
 
@@ -2127,11 +2712,26 @@ export default async function EquipoPage() {
 
   const marcaciones = (data ?? []) as MarcacionConSede[];
 
+  // Alertas de hoy: chequeos periódicos (Etapa 2) que quedaron fuera de zona
+  // o sin responder a tiempo. Misma RLS que marcaciones (admin ve toda la
+  // organización, supervisor solo sus sedes).
+  const { inicio } = rangoDiaActualISO();
+  const { data: chequeosData } = await supabase
+    .from('chequeos_ubicacion')
+    .select('*, sede:sedes(nombre)')
+    .in('estado', ['confirmado_fuera', 'vencido'])
+    .gte('enviado_en', inicio)
+    .order('enviado_en', { ascending: false });
+
+  const alertas = (chequeosData ?? []) as ChequeoConSede[];
+
   // La RLS de perfiles solo permite ver la fila propia (evita recursión); los
   // nombres de los empleados involucrados se resuelven aparte con el cliente
-  // admin. La lista de marcaciones en sí ya viene scopeada por su propia RLS
+  // admin. Las listas de arriba ya vienen scopeadas por su propia RLS
   // (admin ve toda la organización, supervisor solo sus sedes).
-  const empleadoIds = [...new Set(marcaciones.map((m) => m.empleado_id))];
+  const empleadoIds = [
+    ...new Set([...marcaciones.map((m) => m.empleado_id), ...alertas.map((a) => a.empleado_id)]),
+  ];
   const admin = crearClienteAdmin();
   const { data: perfilesData } = await admin
     .from('perfiles')
@@ -2147,6 +2747,29 @@ export default async function EquipoPage() {
         <h1 className="text-xl font-bold text-navy">Presentismo del equipo</h1>
         <p className="text-sm text-gray-500">Últimas marcaciones registradas.</p>
       </div>
+
+      {alertas.length > 0 && (
+        <div className="bg-white rounded-lg shadow-md divide-y divide-gray-100 border-l-4 border-red-400">
+          <h2 className="text-sm font-bold text-gray-700 p-4 pb-2">Alertas de hoy</h2>
+          {alertas.map((a) => (
+            <div key={a.id} className="px-4 py-3 flex items-center justify-between text-sm gap-2">
+              <div className="min-w-0">
+                <p className="font-medium text-gray-800 truncate">
+                  {nombrePorEmpleadoId.get(a.empleado_id) ?? 'Empleado'}
+                </p>
+                <p className="text-gray-500 truncate">
+                  {a.estado === 'vencido' ? 'No confirmó el chequeo' : 'Fuera de zona'} ·{' '}
+                  {formatearFechaHora(a.enviado_en)}
+                  {a.sede?.nombre ? ` · ${a.sede.nombre}` : ''}
+                </p>
+              </div>
+              <span className="text-xs px-2 py-1 rounded bg-red-100 text-red-700 font-medium shrink-0">
+                {a.estado === 'vencido' ? 'Sin confirmar' : 'Fuera de zona'}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="bg-white rounded-lg shadow-md divide-y divide-gray-100">
         {marcaciones.length === 0 && (
@@ -2172,21 +2795,20 @@ export default async function EquipoPage() {
 }
 ```
 
----
-
 ## `app/presentismo/(app)/admin/sedes/page.tsx`
 
 ```tsx
 import { redirect } from 'next/navigation';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 import FormularioSede from '@/components/presentismo/admin/FormularioSede';
 import type { Sede } from '@/lib/presentismo/database.types';
 
 export default async function SedesPage() {
   const sesion = await obtenerSesionActual();
   if (!sesion) return null;
-  if (sesion.perfil.rol !== 'admin') redirect('/presentismo');
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol)) redirect('/presentismo');
 
   const supabase = await crearClienteServidor();
   const { data } = await supabase.from('sedes').select('*').order('nombre');
@@ -2222,8 +2844,6 @@ export default async function SedesPage() {
 }
 ```
 
----
-
 ## `app/presentismo/(app)/admin/empleados/page.tsx`
 
 ```tsx
@@ -2231,10 +2851,12 @@ import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteAdmin } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 import FormularioEmpleado from '@/components/presentismo/admin/FormularioEmpleado';
 import type { Perfil } from '@/lib/presentismo/database.types';
 
 const NOMBRES_ROL: Record<Perfil['rol'], string> = {
+  super_admin: 'Administrador general',
   admin: 'Administrador',
   supervisor_sede: 'Supervisor de sede',
   empleado: 'Empleado',
@@ -2243,7 +2865,7 @@ const NOMBRES_ROL: Record<Perfil['rol'], string> = {
 export default async function EmpleadosPage() {
   const sesion = await obtenerSesionActual();
   if (!sesion) return null;
-  if (sesion.perfil.rol !== 'admin') redirect('/presentismo');
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol)) redirect('/presentismo');
 
   // La RLS de perfiles solo permite ver la fila propia (evita recursión); el
   // listado de todo el equipo se hace con el cliente admin, ya filtrado a la
@@ -2284,21 +2906,20 @@ export default async function EmpleadosPage() {
 }
 ```
 
----
-
 ## `app/presentismo/(app)/admin/empleados/[id]/page.tsx`
 
 ```tsx
 import { redirect, notFound } from 'next/navigation';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor, crearClienteAdmin } from '@/lib/presentismo/supabase-server';
-import { DIAS_SEMANA } from '@/lib/presentismo/constants';
+import { DIAS_SEMANA, ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 import FormularioAsignacion from '@/components/presentismo/admin/FormularioAsignacion';
 import BotonEliminarAsignacion from '@/components/presentismo/admin/BotonEliminarAsignacion';
 import TogglesSupervisorSede from '@/components/presentismo/admin/TogglesSupervisorSede';
 import type { EmpleadoSede, Perfil, Sede } from '@/lib/presentismo/database.types';
 
 const NOMBRES_ROL: Record<Perfil['rol'], string> = {
+  super_admin: 'Administrador general',
   admin: 'Administrador',
   supervisor_sede: 'Supervisor de sede',
   empleado: 'Empleado',
@@ -2319,7 +2940,7 @@ export default async function DetalleEmpleadoPage({
   const { id } = await params;
   const sesion = await obtenerSesionActual();
   if (!sesion) return null;
-  if (sesion.perfil.rol !== 'admin') redirect('/presentismo');
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol)) redirect('/presentismo');
 
   const supabase = await crearClienteServidor();
   // La RLS de perfiles solo permite ver la fila propia (evita recursión); se
@@ -2378,11 +2999,65 @@ export default async function DetalleEmpleadoPage({
 }
 ```
 
----
+## `app/presentismo/(app)/superadmin/clientes/page.tsx`
+
+```tsx
+import { redirect } from 'next/navigation';
+import { obtenerSesionActual } from '@/lib/presentismo/sesion';
+import { crearClienteAdmin } from '@/lib/presentismo/supabase-server';
+import FormularioNuevoCliente from '@/components/presentismo/superadmin/FormularioNuevoCliente';
+import type { Organizacion } from '@/lib/presentismo/database.types';
+
+function formatearFecha(iso: string) {
+  return new Date(iso).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+export default async function ClientesPage() {
+  const sesion = await obtenerSesionActual();
+  if (!sesion) return null;
+  if (sesion.perfil.rol !== 'super_admin') redirect('/presentismo');
+
+  // Cada organización solo se ve a sí misma por RLS; para listarlas todas
+  // (tarea exclusiva del dueño de la plataforma) usamos el cliente admin.
+  const admin = crearClienteAdmin();
+  const { data } = await admin.from('organizaciones').select('*').order('created_at', { ascending: false });
+  const organizaciones = (data ?? []) as Organizacion[];
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-xl font-bold text-navy">Empresas clientes</h1>
+        <p className="text-sm text-gray-500">
+          Alta de empresas nuevas y su primer usuario administrador.
+        </p>
+      </div>
+
+      <FormularioNuevoCliente />
+
+      <div className="bg-white rounded-lg shadow-md divide-y divide-gray-100">
+        {organizaciones.length === 0 && (
+          <p className="p-4 text-sm text-gray-500">Todavía no hay empresas cargadas.</p>
+        )}
+        {organizaciones.map((org) => (
+          <div key={org.id} className="p-4 flex items-center justify-between text-sm">
+            <div>
+              <p className="font-medium text-gray-800">{org.nombre}</p>
+              <p className="text-gray-500">Creada el {formatearFecha(org.created_at)}</p>
+            </div>
+            {!org.activa && (
+              <span className="text-xs px-2 py-0.5 rounded bg-gray-200 text-gray-600">Inactiva</span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
 
 ## `app/presentismo/api/marcar/route.ts`
 
-```tsx
+```ts
 import { NextResponse } from 'next/server';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
 import { evaluarUbicacionContraSedes, esTarde, type AsignacionConSede } from '@/lib/presentismo/geo';
@@ -2466,11 +3141,9 @@ export async function POST(request: Request) {
 }
 ```
 
----
-
 ## `app/presentismo/api/consentimiento/route.ts`
 
-```tsx
+```ts
 import { NextResponse } from 'next/server';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
 
@@ -2493,14 +3166,243 @@ export async function POST() {
 }
 ```
 
----
+## `app/presentismo/api/chequeo/[id]/responder/route.ts`
 
-## `app/presentismo/api/admin/sedes/route.ts`
-
-```tsx
+```ts
 import { NextResponse } from 'next/server';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+
+interface CuerpoRespuesta {
+  lat?: number;
+  lon?: number;
+}
+
+export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const sesion = await obtenerSesionActual();
+  if (!sesion) return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
+
+  let body: CuerpoRespuesta;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'body_invalido' }, { status: 400 });
+  }
+
+  const { lat, lon } = body;
+  if (typeof lat !== 'number' || typeof lon !== 'number') {
+    return NextResponse.json({ error: 'datos_invalidos' }, { status: 400 });
+  }
+
+  const supabase = await crearClienteServidor();
+  // La función valida que el chequeo sea del usuario logueado y calcula la
+  // distancia server-side; no confía en nada más que las coordenadas crudas.
+  const { data: chequeo, error } = await supabase.rpc('responder_chequeo', {
+    chequeo_id: id,
+    lat,
+    lon,
+  });
+
+  if (error) {
+    return NextResponse.json({ error: 'chequeo_no_valido' }, { status: 400 });
+  }
+
+  return NextResponse.json({ chequeo });
+}
+```
+
+## `app/presentismo/api/cron/enviar-chequeos/route.ts`
+
+```ts
+import { NextResponse } from 'next/server';
+import { crearClienteAdmin } from '@/lib/presentismo/supabase-server';
+import { horaEnRango, diaSemanaActual } from '@/lib/presentismo/geo';
+import { rangoDiaActualISO } from '@/lib/presentismo/fecha';
+import { enviarPush } from '@/lib/presentismo/push';
+import type { EmpleadoSede, Marcacion, Sede } from '@/lib/presentismo/database.types';
+
+export const maxDuration = 60;
+
+const MINUTOS_VENCIMIENTO = 10;
+const MINUTOS_ANTIRREPETICION = 55;
+
+type AsignacionConDetalle = EmpleadoSede & {
+  sede: Sede | null;
+  empleado: { id: string; organizacion_id: string; activo: boolean } | null;
+};
+
+/**
+ * Disparada cada hora por un cron externo (ver supabase/schema.sql, pg_cron).
+ * Vence los chequeos pendientes que pasaron su límite, y crea + notifica un
+ * chequeo nuevo para cada empleado que esté "en curso" (marcó ingreso, no
+ * egreso) y dentro de un horario asignado en este momento.
+ */
+export async function POST(request: Request) {
+  const secretoEsperado = process.env.CRON_SECRET;
+  const autorizacion = request.headers.get('authorization');
+  if (!secretoEsperado || autorizacion !== `Bearer ${secretoEsperado}`) {
+    return NextResponse.json({ error: 'no_autorizado' }, { status: 401 });
+  }
+
+  const admin = crearClienteAdmin();
+  const ahora = new Date();
+
+  await admin
+    .from('chequeos_ubicacion')
+    .update({ estado: 'vencido' })
+    .eq('estado', 'pendiente')
+    .lt('vence_en', ahora.toISOString());
+
+  const { data: asignacionesData } = await admin
+    .from('empleado_sedes')
+    .select('*, sede:sedes(*), empleado:perfiles(id, organizacion_id, activo)');
+
+  const asignaciones = (asignacionesData ?? []) as AsignacionConDetalle[];
+
+  const diaActual = diaSemanaActual(ahora);
+  const activasAhora = asignaciones.filter(
+    (a) =>
+      a.sede &&
+      a.empleado?.activo &&
+      a.dias_semana.includes(diaActual) &&
+      horaEnRango(ahora, a.hora_inicio, a.hora_fin)
+  );
+
+  if (activasAhora.length === 0) {
+    return NextResponse.json({ enviados: 0, motivo: 'sin_asignaciones_activas_ahora' });
+  }
+
+  const empleadoIds = [...new Set(activasAhora.map((a) => a.empleado_id))];
+
+  // "En curso": la última marcación de hoy fue un ingreso sin egreso posterior.
+  const { inicio } = rangoDiaActualISO(ahora);
+  const { data: marcacionesHoyData } = await admin
+    .from('marcaciones')
+    .select('empleado_id, tipo, timestamp_marcacion')
+    .in('empleado_id', empleadoIds)
+    .gte('timestamp_marcacion', inicio)
+    .order('timestamp_marcacion', { ascending: true });
+
+  const ultimoTipoPorEmpleado = new Map<string, Marcacion['tipo']>();
+  for (const m of (marcacionesHoyData ?? []) as Pick<Marcacion, 'empleado_id' | 'tipo' | 'timestamp_marcacion'>[]) {
+    ultimoTipoPorEmpleado.set(m.empleado_id, m.tipo);
+  }
+  const enCurso = new Set(
+    [...ultimoTipoPorEmpleado.entries()].filter(([, tipo]) => tipo === 'ingreso').map(([id]) => id)
+  );
+
+  // No mandar de nuevo si ya se envió un chequeo hace poco (evita duplicados
+  // si el disparador externo llega a correr dos veces cerca en el tiempo).
+  const desde = new Date(ahora.getTime() - MINUTOS_ANTIRREPETICION * 60 * 1000).toISOString();
+  const { data: recientesData } = await admin
+    .from('chequeos_ubicacion')
+    .select('empleado_id')
+    .in('empleado_id', empleadoIds)
+    .gte('enviado_en', desde);
+  const yaAvisadosRecientemente = new Set((recientesData ?? []).map((c) => c.empleado_id as string));
+
+  const candidatos = new Map<string, AsignacionConDetalle>();
+  for (const a of activasAhora) {
+    if (!enCurso.has(a.empleado_id)) continue;
+    if (yaAvisadosRecientemente.has(a.empleado_id)) continue;
+    if (!candidatos.has(a.empleado_id)) candidatos.set(a.empleado_id, a);
+  }
+
+  let enviados = 0;
+  const venceEn = new Date(ahora.getTime() + MINUTOS_VENCIMIENTO * 60 * 1000).toISOString();
+
+  for (const asignacion of candidatos.values()) {
+    const { data: chequeo, error } = await admin
+      .from('chequeos_ubicacion')
+      .insert({
+        empleado_id: asignacion.empleado_id,
+        organizacion_id: asignacion.empleado!.organizacion_id,
+        sede_id: asignacion.sede_id,
+        enviado_en: ahora.toISOString(),
+        vence_en: venceEn,
+        estado: 'pendiente',
+      })
+      .select()
+      .single();
+
+    if (error || !chequeo) continue;
+
+    const { data: suscripciones } = await admin
+      .from('push_subscriptions')
+      .select('*')
+      .eq('empleado_id', asignacion.empleado_id);
+
+    for (const sub of suscripciones ?? []) {
+      const resultado = await enviarPush(
+        { endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth },
+        {
+          titulo: 'Confirmá tu ubicación',
+          cuerpo: `Tenés ${MINUTOS_VENCIMIENTO} minutos para confirmar que seguís en tu puesto.`,
+          chequeoId: chequeo.id,
+        }
+      );
+      if (resultado.expirada) {
+        await admin.from('push_subscriptions').delete().eq('id', sub.id);
+      }
+    }
+
+    enviados += 1;
+  }
+
+  return NextResponse.json({ enviados, candidatos: candidatos.size });
+}
+```
+
+## `app/presentismo/api/push/suscribir/route.ts`
+
+```ts
+import { NextResponse } from 'next/server';
+import { obtenerSesionActual } from '@/lib/presentismo/sesion';
+import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+
+interface CuerpoSuscripcion {
+  endpoint?: string;
+  p256dh?: string;
+  auth?: string;
+}
+
+export async function POST(request: Request) {
+  const sesion = await obtenerSesionActual();
+  if (!sesion) return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
+
+  let body: CuerpoSuscripcion;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'body_invalido' }, { status: 400 });
+  }
+
+  const { endpoint, p256dh, auth } = body;
+  if (!endpoint || !p256dh || !auth) {
+    return NextResponse.json({ error: 'datos_invalidos' }, { status: 400 });
+  }
+
+  const supabase = await crearClienteServidor();
+  const { error } = await supabase
+    .from('push_subscriptions')
+    .upsert({ empleado_id: sesion.userId, endpoint, p256dh, auth }, { onConflict: 'endpoint' });
+
+  if (error) {
+    return NextResponse.json({ error: 'error_guardando' }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true });
+}
+```
+
+## `app/presentismo/api/admin/sedes/route.ts`
+
+```ts
+import { NextResponse } from 'next/server';
+import { obtenerSesionActual } from '@/lib/presentismo/sesion';
+import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 
 interface CuerpoSede {
   nombre?: string;
@@ -2512,7 +3414,7 @@ interface CuerpoSede {
 export async function POST(request: Request) {
   const sesion = await obtenerSesionActual();
   if (!sesion) return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
-  if (sesion.perfil.rol !== 'admin') {
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol)) {
     return NextResponse.json({ error: 'no_autorizado' }, { status: 403 });
   }
 
@@ -2555,21 +3457,20 @@ export async function POST(request: Request) {
 }
 ```
 
----
-
 ## `app/presentismo/api/admin/sedes/[id]/route.ts`
 
-```tsx
+```ts
 import { NextResponse } from 'next/server';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 
 /** Por ahora solo permite asignar/quitar el supervisor de la sede. */
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const sesion = await obtenerSesionActual();
   if (!sesion) return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
-  if (sesion.perfil.rol !== 'admin') {
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol)) {
     return NextResponse.json({ error: 'no_autorizado' }, { status: 403 });
   }
 
@@ -2594,16 +3495,17 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 }
 ```
 
----
-
 ## `app/presentismo/api/admin/empleados/route.ts`
 
-```tsx
+```ts
 import { NextResponse } from 'next/server';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteAdmin } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 import type { RolUsuario } from '@/lib/presentismo/database.types';
 
+// A propósito sin 'super_admin' acá: un admin de empresa cliente nunca debe
+// poder crear otro super_admin (sería escalar privilegios a nivel plataforma).
 const ROLES_VALIDOS: RolUsuario[] = ['admin', 'supervisor_sede', 'empleado'];
 
 interface CuerpoEmpleado {
@@ -2620,7 +3522,7 @@ function generarPasswordTemporal(): string {
 export async function POST(request: Request) {
   const sesion = await obtenerSesionActual();
   if (!sesion) return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
-  if (sesion.perfil.rol !== 'admin') {
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol)) {
     return NextResponse.json({ error: 'no_autorizado' }, { status: 403 });
   }
 
@@ -2667,14 +3569,13 @@ export async function POST(request: Request) {
 }
 ```
 
----
-
 ## `app/presentismo/api/admin/asignaciones/route.ts`
 
-```tsx
+```ts
 import { NextResponse } from 'next/server';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 
 interface CuerpoAsignacion {
   empleadoId?: string;
@@ -2687,7 +3588,7 @@ interface CuerpoAsignacion {
 export async function POST(request: Request) {
   const sesion = await obtenerSesionActual();
   if (!sesion) return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
-  if (sesion.perfil.rol !== 'admin') {
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol)) {
     return NextResponse.json({ error: 'no_autorizado' }, { status: 403 });
   }
 
@@ -2735,20 +3636,19 @@ export async function POST(request: Request) {
 }
 ```
 
----
-
 ## `app/presentismo/api/admin/asignaciones/[id]/route.ts`
 
-```tsx
+```ts
 import { NextResponse } from 'next/server';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 
 export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const sesion = await obtenerSesionActual();
   if (!sesion) return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
-  if (sesion.perfil.rol !== 'admin') {
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol)) {
     return NextResponse.json({ error: 'no_autorizado' }, { status: 403 });
   }
 
@@ -2763,7 +3663,87 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
 }
 ```
 
----
+## `app/presentismo/api/superadmin/clientes/route.ts`
+
+```ts
+import { NextResponse } from 'next/server';
+import { obtenerSesionActual } from '@/lib/presentismo/sesion';
+import { crearClienteAdmin } from '@/lib/presentismo/supabase-server';
+
+interface CuerpoCliente {
+  nombreEmpresa?: string;
+  nombreAdmin?: string;
+  emailAdmin?: string;
+}
+
+function generarPasswordTemporal(): string {
+  const azar = () => Math.random().toString(36).slice(-4);
+  return `${azar()}${azar()}-${azar()}`;
+}
+
+export async function POST(request: Request) {
+  const sesion = await obtenerSesionActual();
+  if (!sesion) return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
+  // Solo el dueño de la plataforma da de alta empresas clientes nuevas —
+  // un admin de una empresa cliente no debe poder crear otras.
+  if (sesion.perfil.rol !== 'super_admin') {
+    return NextResponse.json({ error: 'no_autorizado' }, { status: 403 });
+  }
+
+  let body: CuerpoCliente;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'body_invalido' }, { status: 400 });
+  }
+
+  const { nombreEmpresa, nombreAdmin, emailAdmin } = body;
+  if (!nombreEmpresa || !nombreAdmin || !emailAdmin) {
+    return NextResponse.json({ error: 'datos_invalidos' }, { status: 400 });
+  }
+
+  const admin = crearClienteAdmin();
+
+  const { data: organizacion, error: errorOrganizacion } = await admin
+    .from('organizaciones')
+    .insert({ nombre: nombreEmpresa })
+    .select()
+    .single();
+
+  if (errorOrganizacion || !organizacion) {
+    return NextResponse.json({ error: 'error_creando_organizacion' }, { status: 500 });
+  }
+
+  const passwordTemporal = generarPasswordTemporal();
+  const { data: nuevoUsuario, error: errorCreandoUsuario } = await admin.auth.admin.createUser({
+    email: emailAdmin,
+    password: passwordTemporal,
+    email_confirm: true,
+  });
+
+  if (errorCreandoUsuario || !nuevoUsuario?.user) {
+    await admin.from('organizaciones').delete().eq('id', organizacion.id);
+    const enUso = errorCreandoUsuario?.message?.toLowerCase().includes('already');
+    return NextResponse.json({ error: enUso ? 'email_en_uso' : 'error_creando_usuario' }, { status: 400 });
+  }
+
+  const { error: errorPerfil } = await admin.from('perfiles').insert({
+    id: nuevoUsuario.user.id,
+    organizacion_id: organizacion.id,
+    nombre_completo: nombreAdmin,
+    rol: 'admin',
+    activo: true,
+  });
+
+  if (errorPerfil) {
+    await admin.auth.admin.deleteUser(nuevoUsuario.user.id);
+    await admin.from('organizaciones').delete().eq('id', organizacion.id);
+    return NextResponse.json({ error: 'error_creando_perfil' }, { status: 500 });
+  }
+
+  return NextResponse.json({ passwordTemporal, organizacion });
+}
+```
 
 ## `public/presentismo/icon.svg`
 
@@ -2778,5 +3758,47 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
 </svg>
 ```
 
----
+## `public/presentismo/sw.js`
+
+```js
+// Service worker del módulo de presentismo. Solo hace dos cosas: mostrar el
+// aviso de chequeo de ubicación que llega por push, y abrir la app cuando el
+// empleado lo toca. No cachea nada ni intercepta pedidos de red.
+
+self.addEventListener('push', (event) => {
+  let datos = { title: 'Presentismo', body: 'Confirmá tu ubicación', chequeoId: '' };
+  try {
+    if (event.data) datos = event.data.json();
+  } catch {
+    // si el payload no es JSON válido, se usan los valores por defecto
+  }
+
+  event.waitUntil(
+    self.registration.showNotification(datos.title, {
+      body: datos.body,
+      tag: 'chequeo-presentismo',
+      data: { chequeoId: datos.chequeoId },
+      requireInteraction: true,
+    })
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const chequeoId = event.notification.data?.chequeoId ?? '';
+  const url = `/presentismo?chequeo=${encodeURIComponent(chequeoId)}`;
+
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if ('focus' in client) {
+          client.navigate(url);
+          return client.focus();
+        }
+      }
+      return self.clients.openWindow(url);
+    })
+  );
+});
+```
 
