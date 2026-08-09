@@ -105,8 +105,16 @@ Según el plan original en 3 etapas:
 
 - **Etapa 1 (hecha)**: marcado manual con geovalidación, consentimiento, sedes y
   horarios multi-sede, roles, historial propio.
-- **Etapa 2 (pendiente)**: monitoreo periódico durante la jornada (estado
-  dentro/fuera en tiempo real, sin tracking continuo).
+- **Etapa 2 (hecha)**: chequeos periódicos durante la jornada. Mientras un empleado
+  está "en curso" (marcó ingreso, todavía no marcó egreso) y dentro de su horario
+  asignado, cada 1 hora le llega una notificación push pidiéndole confirmar su
+  ubicación; tiene 10 minutos para responder desde la app (no hace falta tenerla
+  abierta, el aviso llega igual con el teléfono bloqueado, siempre que la app esté
+  instalada — ver sección 4 del manual de PWA). Si confirma estando dentro del radio
+  de la sede, no se guarda nada. Si confirma estando fuera, o si no responde a
+  tiempo, queda una alerta visible en "Presentismo del equipo" para el admin/supervisor,
+  y solo en ese caso se guarda la coordenada. El disparador horario corre gratis en la
+  base de Supabase (`pg_cron`, ver `supabase/schema.sql`), no en Vercel.
 - **Etapa 3 (pendiente)**: vista de presentismo por día con estados (a horario /
   tarde / fuera de zona / ausente) y exportación CSV/Excel para nómina.
 
