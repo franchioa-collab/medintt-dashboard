@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor, crearClienteAdmin } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 import BadgeResultado from '@/components/presentismo/BadgeResultado';
 import type { Marcacion, Sede } from '@/lib/presentismo/database.types';
 
@@ -21,7 +22,7 @@ function formatearFechaHora(iso: string) {
 export default async function EquipoPage() {
   const sesion = await obtenerSesionActual();
   if (!sesion) return null;
-  if (sesion.perfil.rol !== 'admin' && sesion.perfil.rol !== 'supervisor_sede') {
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol) && sesion.perfil.rol !== 'supervisor_sede') {
     redirect('/presentismo');
   }
 

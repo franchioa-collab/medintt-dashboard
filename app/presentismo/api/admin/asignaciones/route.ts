@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 
 interface CuerpoAsignacion {
   empleadoId?: string;
@@ -13,7 +14,7 @@ interface CuerpoAsignacion {
 export async function POST(request: Request) {
   const sesion = await obtenerSesionActual();
   if (!sesion) return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
-  if (sesion.perfil.rol !== 'admin') {
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol)) {
     return NextResponse.json({ error: 'no_autorizado' }, { status: 403 });
   }
 

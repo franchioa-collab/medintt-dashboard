@@ -2,6 +2,7 @@ import type { Organizacion, Perfil } from '@/lib/presentismo/database.types';
 import LogoutButton from './LogoutButton';
 
 const NOMBRES_ROL: Record<Perfil['rol'], string> = {
+  super_admin: 'Administrador general',
   admin: 'Administrador',
   supervisor_sede: 'Supervisor de sede',
   empleado: 'Empleado',

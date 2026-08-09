@@ -2,7 +2,9 @@
 // Si el esquema cambia en Supabase, actualizar este archivo (o regenerarlo con
 // `supabase gen types typescript` una vez que el proyecto esté creado).
 
-export type RolUsuario = 'admin' | 'supervisor_sede' | 'empleado';
+// 'super_admin' es el dueño de la plataforma (Medintt): da de alta empresas
+// clientes nuevas. 'admin' administra una sola empresa cliente puntual.
+export type RolUsuario = 'super_admin' | 'admin' | 'supervisor_sede' | 'empleado';
 export type TipoMarcacion = 'ingreso' | 'egreso';
 export type ResultadoValidacion = 'dentro_de_zona' | 'fuera_de_zona';
 

@@ -1,17 +1,11 @@
 import { NextResponse } from 'next/server';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteAdmin } from '@/lib/presentismo/supabase-server';
-import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
-import type { RolUsuario } from '@/lib/presentismo/database.types';
 
-// A propósito sin 'super_admin' acá: un admin de empresa cliente nunca debe
-// poder crear otro super_admin (sería escalar privilegios a nivel plataforma).
-const ROLES_VALIDOS: RolUsuario[] = ['admin', 'supervisor_sede', 'empleado'];
-
-interface CuerpoEmpleado {
-  nombreCompleto?: string;
-  email?: string;
-  rol?: RolUsuario;
+interface CuerpoCliente {
+  nombreEmpresa?: string;
+  nombreAdmin?: string;
+  emailAdmin?: string;
 }
 
 function generarPasswordTemporal(): string {
@@ -22,48 +16,62 @@ function generarPasswordTemporal(): string {
 export async function POST(request: Request) {
   const sesion = await obtenerSesionActual();
   if (!sesion) return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
-  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol)) {
+  // Solo el dueño de la plataforma da de alta empresas clientes nuevas —
+  // un admin de una empresa cliente no debe poder crear otras.
+  if (sesion.perfil.rol !== 'super_admin') {
     return NextResponse.json({ error: 'no_autorizado' }, { status: 403 });
   }
 
-  let body: CuerpoEmpleado;
+  let body: CuerpoCliente;
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: 'body_invalido' }, { status: 400 });
   }
 
-  const { nombreCompleto, email, rol } = body;
-  if (!nombreCompleto || !email || !rol || !ROLES_VALIDOS.includes(rol)) {
+  const { nombreEmpresa, nombreAdmin, emailAdmin } = body;
+  if (!nombreEmpresa || !nombreAdmin || !emailAdmin) {
     return NextResponse.json({ error: 'datos_invalidos' }, { status: 400 });
   }
 
-  const passwordTemporal = generarPasswordTemporal();
   const admin = crearClienteAdmin();
 
+  const { data: organizacion, error: errorOrganizacion } = await admin
+    .from('organizaciones')
+    .insert({ nombre: nombreEmpresa })
+    .select()
+    .single();
+
+  if (errorOrganizacion || !organizacion) {
+    return NextResponse.json({ error: 'error_creando_organizacion' }, { status: 500 });
+  }
+
+  const passwordTemporal = generarPasswordTemporal();
   const { data: nuevoUsuario, error: errorCreandoUsuario } = await admin.auth.admin.createUser({
-    email,
+    email: emailAdmin,
     password: passwordTemporal,
     email_confirm: true,
   });
 
   if (errorCreandoUsuario || !nuevoUsuario?.user) {
+    await admin.from('organizaciones').delete().eq('id', organizacion.id);
     const enUso = errorCreandoUsuario?.message?.toLowerCase().includes('already');
     return NextResponse.json({ error: enUso ? 'email_en_uso' : 'error_creando_usuario' }, { status: 400 });
   }
 
   const { error: errorPerfil } = await admin.from('perfiles').insert({
     id: nuevoUsuario.user.id,
-    organizacion_id: sesion.organizacion.id,
-    nombre_completo: nombreCompleto,
-    rol,
+    organizacion_id: organizacion.id,
+    nombre_completo: nombreAdmin,
+    rol: 'admin',
     activo: true,
   });
 
   if (errorPerfil) {
     await admin.auth.admin.deleteUser(nuevoUsuario.user.id);
+    await admin.from('organizaciones').delete().eq('id', organizacion.id);
     return NextResponse.json({ error: 'error_creando_perfil' }, { status: 500 });
   }
 
-  return NextResponse.json({ passwordTemporal });
+  return NextResponse.json({ passwordTemporal, organizacion });
 }

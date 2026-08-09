@@ -5,12 +5,25 @@ import { usePathname } from 'next/navigation';
 import type { RolUsuario } from '@/lib/presentismo/database.types';
 
 const ITEMS: { href: string; label: string; roles: RolUsuario[] }[] = [
-  { href: '/presentismo', label: 'Marcar', roles: ['admin', 'supervisor_sede', 'empleado'] },
-  { href: '/presentismo/historial', label: 'Mi historial', roles: ['admin', 'supervisor_sede', 'empleado'] },
-  { href: '/presentismo/admin', label: 'Presentismo del equipo', roles: ['admin', 'supervisor_sede'] },
-  { href: '/presentismo/admin/sedes', label: 'Sedes', roles: ['admin'] },
-  { href: '/presentismo/admin/empleados', label: 'Empleados', roles: ['admin'] },
-  { href: '/presentismo/cuenta', label: 'Mi cuenta', roles: ['admin', 'supervisor_sede', 'empleado'] },
+  { href: '/presentismo', label: 'Marcar', roles: ['super_admin', 'admin', 'supervisor_sede', 'empleado'] },
+  {
+    href: '/presentismo/historial',
+    label: 'Mi historial',
+    roles: ['super_admin', 'admin', 'supervisor_sede', 'empleado'],
+  },
+  {
+    href: '/presentismo/admin',
+    label: 'Presentismo del equipo',
+    roles: ['super_admin', 'admin', 'supervisor_sede'],
+  },
+  { href: '/presentismo/admin/sedes', label: 'Sedes', roles: ['super_admin', 'admin'] },
+  { href: '/presentismo/admin/empleados', label: 'Empleados', roles: ['super_admin', 'admin'] },
+  { href: '/presentismo/superadmin/clientes', label: 'Empresas clientes', roles: ['super_admin'] },
+  {
+    href: '/presentismo/cuenta',
+    label: 'Mi cuenta',
+    roles: ['super_admin', 'admin', 'supervisor_sede', 'empleado'],
+  },
 ];
 
 export default function NavPresentismo({ rol }: { rol: RolUsuario }) {

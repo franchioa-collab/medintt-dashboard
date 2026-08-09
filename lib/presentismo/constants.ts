@@ -1,3 +1,5 @@
+import type { RolUsuario } from './database.types';
+
 export const TOLERANCIA_TARDE_MINUTOS = 15;
 
 export const RADIO_METROS_DEFAULT = 400;
@@ -13,3 +15,7 @@ export const DIAS_SEMANA = [
 ] as const;
 
 export const DIAS_HABILES_DEFAULT = [1, 2, 3, 4, 5];
+
+// super_admin puede hacer todo lo que un admin de empresa puede, además de
+// dar de alta empresas clientes nuevas (ver /presentismo/superadmin).
+export const ROLES_ADMIN_EMPRESA: readonly RolUsuario[] = ['admin', 'super_admin'];

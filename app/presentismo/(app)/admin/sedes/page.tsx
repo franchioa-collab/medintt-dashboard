@@ -1,13 +1,14 @@
 import { redirect } from 'next/navigation';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 import FormularioSede from '@/components/presentismo/admin/FormularioSede';
 import type { Sede } from '@/lib/presentismo/database.types';
 
 export default async function SedesPage() {
   const sesion = await obtenerSesionActual();
   if (!sesion) return null;
-  if (sesion.perfil.rol !== 'admin') redirect('/presentismo');
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol)) redirect('/presentismo');
 
   const supabase = await crearClienteServidor();
   const { data } = await supabase.from('sedes').select('*').order('nombre');

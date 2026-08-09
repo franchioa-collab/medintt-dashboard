@@ -10,7 +10,9 @@ create extension if not exists "pgcrypto";
 -- ---------------------------------------------------------------------
 -- Tipos
 -- ---------------------------------------------------------------------
-create type rol_usuario as enum ('admin', 'supervisor_sede', 'empleado');
+-- 'super_admin' es el dueño de la plataforma (Medintt): da de alta empresas
+-- clientes nuevas. 'admin' administra una sola empresa cliente puntual.
+create type rol_usuario as enum ('super_admin', 'admin', 'supervisor_sede', 'empleado');
 create type tipo_marcacion as enum ('ingreso', 'egreso');
 create type resultado_validacion as enum ('dentro_de_zona', 'fuera_de_zona');
 
