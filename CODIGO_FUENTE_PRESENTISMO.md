@@ -583,6 +583,42 @@ function urlBase64ToUint8Array(base64: string): Uint8Array {
 
 export type EstadoPush = 'no_soportado' | 'inactivo' | 'activando' | 'activo' | 'rechazado' | 'error';
 
+async function enviarSuscripcionAlServidor(suscripcion: PushSubscription): Promise<boolean> {
+  const json = suscripcion.toJSON();
+  const res = await fetch('/presentismo/api/push/suscribir', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      endpoint: json.endpoint,
+      p256dh: json.keys?.p256dh,
+      auth: json.keys?.auth,
+    }),
+  });
+  return res.ok;
+}
+
+/**
+ * Si el navegador ya tiene una suscripción push activa (de un intento previo
+ * que se haya cortado antes de avisarle al servidor), se la vuelve a mandar.
+ * Sirve para autocurar el caso en que el usuario navegó a otra pantalla
+ * mientras se registraba, dejando el navegador suscripto pero el backend sin
+ * el registro.
+ */
+export async function sincronizarSuscripcionExistente(): Promise<boolean> {
+  if (typeof window === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+    return false;
+  }
+  try {
+    const registro = await navigator.serviceWorker.getRegistration('/presentismo/');
+    const suscripcion = await registro?.pushManager.getSubscription();
+    if (!suscripcion) return false;
+    await enviarSuscripcionAlServidor(suscripcion);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Registra el service worker y suscribe al empleado a los avisos push de chequeo. */
 export function usePush() {
   const [estado, setEstado] = useState<EstadoPush>('inactivo');
@@ -620,18 +656,8 @@ export function usePush() {
           ) as BufferSource,
         }));
 
-      const json = suscripcion.toJSON();
-      const res = await fetch('/presentismo/api/push/suscribir', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          endpoint: json.endpoint,
-          p256dh: json.keys?.p256dh,
-          auth: json.keys?.auth,
-        }),
-      });
-
-      if (!res.ok) {
+      const ok = await enviarSuscripcionAlServidor(suscripcion);
+      if (!ok) {
         setEstado('error');
         return false;
       }
@@ -1651,7 +1677,7 @@ export default function PantallaConsentimiento() {
 'use client';
 
 import { useEffect, useState } from 'react';
-import { usePush } from '@/hooks/usePush';
+import { usePush, sincronizarSuscripcionExistente } from '@/hooks/usePush';
 
 export default function RegistroPush() {
   const { estado, activar } = usePush();
@@ -1663,15 +1689,11 @@ export default function RegistroPush() {
       setYaActivo(false);
       return;
     }
-    navigator.serviceWorker
-      .getRegistration('/presentismo/')
-      .then((registro) => registro?.pushManager.getSubscription())
-      .then((suscripcion) => {
-        if (!cancelado) setYaActivo(Boolean(suscripcion));
-      })
-      .catch(() => {
-        if (!cancelado) setYaActivo(false);
-      });
+    // Si el navegador ya tenía una suscripción de un intento anterior que se
+    // cortó antes de avisarle al servidor, esto la vuelve a mandar.
+    sincronizarSuscripcionExistente().then((activa) => {
+      if (!cancelado) setYaActivo(activa);
+    });
     return () => {
       cancelado = true;
     };
@@ -3788,17 +3810,13 @@ self.addEventListener('notificationclick', (event) => {
   const chequeoId = event.notification.data?.chequeoId ?? '';
   const url = `/presentismo?chequeo=${encodeURIComponent(chequeoId)}`;
 
-  event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
-      for (const client of clientList) {
-        if ('focus' in client) {
-          client.navigate(url);
-          return client.focus();
-        }
-      }
-      return self.clients.openWindow(url);
-    })
-  );
+  // clients.openWindow() directo: es el patrón que Chrome soporta de forma
+  // confiable. La alternativa de buscar una pestaña abierta con matchAll() y
+  // navegarla pierde la activación de usuario del click en algunas versiones
+  // de Chrome/Android y falla en silencio (el aviso se cierra pero no pasa
+  // nada). Chrome de todos modos enfoca una pestaña existente de este origen
+  // cuando puede, así que no hace falta buscarla a mano.
+  event.waitUntil(self.clients.openWindow(url));
 });
 ```
 
