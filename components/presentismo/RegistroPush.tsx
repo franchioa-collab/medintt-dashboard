@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { usePush } from '@/hooks/usePush';
+import { usePush, sincronizarSuscripcionExistente } from '@/hooks/usePush';
 
 export default function RegistroPush() {
   const { estado, activar } = usePush();
@@ -13,15 +13,11 @@ export default function RegistroPush() {
       setYaActivo(false);
       return;
     }
-    navigator.serviceWorker
-      .getRegistration('/presentismo/')
-      .then((registro) => registro?.pushManager.getSubscription())
-      .then((suscripcion) => {
-        if (!cancelado) setYaActivo(Boolean(suscripcion));
-      })
-      .catch(() => {
-        if (!cancelado) setYaActivo(false);
-      });
+    // Si el navegador ya tenía una suscripción de un intento anterior que se
+    // cortó antes de avisarle al servidor, esto la vuelve a mandar.
+    sincronizarSuscripcionExistente().then((activa) => {
+      if (!cancelado) setYaActivo(activa);
+    });
     return () => {
       cancelado = true;
     };
