@@ -4,6 +4,7 @@ import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteAdmin } from '@/lib/presentismo/supabase-server';
 import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 import FormularioEmpleado from '@/components/presentismo/admin/FormularioEmpleado';
+import CargaMasivaEmpleados from '@/components/presentismo/admin/CargaMasivaEmpleados';
 import type { Perfil } from '@/lib/presentismo/database.types';
 
 const NOMBRES_ROL: Record<Perfil['rol'], string> = {
@@ -34,6 +35,8 @@ export default async function EmpleadosPage() {
       <h1 className="text-xl font-bold text-navy">Empleados</h1>
 
       <FormularioEmpleado />
+
+      <CargaMasivaEmpleados />
 
       <div className="bg-white rounded-lg shadow-md divide-y divide-gray-100">
         {empleados.map((emp) => (
