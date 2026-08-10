@@ -63,6 +63,23 @@ values ('UID-DEL-USUARIO', 'ID-DE-LA-ORGANIZACION', 'Nombre y Apellido', 'admin'
 
 ## 4. Tareas frecuentes
 
+### Cargar muchos empleados de una sola vez (carga masiva por CSV)
+Cuando un cliente nuevo trae su base de RRHH, no hace falta cargar empleado por
+empleado: en **Empleados → "Carga masiva por CSV"** (rol `admin` o `super_admin`)
+se puede subir un archivo con columnas `nombre_completo`, `email` y, opcional,
+`rol`. La pantalla muestra una vista previa fila por fila antes de crear nada
+(marca filas con datos faltantes, email inválido o duplicado) y al final deja
+descargar un CSV con las contraseñas temporales de cada empleado creado, para
+compartirlas de forma segura en vez de leerlas de la pantalla.
+
+Limitaciones a tener en cuenta:
+- **Cada empleado necesita un email único** — si la base del cliente no tiene
+  email cargado para todo el personal, esos quedan afuera hasta asignarles uno.
+- Tope de **200 filas por archivo** (limitación de duración de las funciones
+  serverless de Vercel); bases más grandes se dividen en varios CSV.
+- El rol nunca puede ser `super_admin` desde acá, a propósito — evita que un
+  admin de una empresa cliente escale privilegios a nivel plataforma.
+
 ### Resetear la contraseña de un usuario que se la olvidó
 Supabase → Authentication → Users → buscar el email → clic en el usuario → menú de
 opciones → reset/enviar recuperación (o fijarle una nueva desde ahí mismo). No hace
