@@ -3,6 +3,7 @@ import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
 import { rangoDiaActualISO } from '@/lib/presentismo/fecha';
 import PantallaConsentimiento from '@/components/presentismo/PantallaConsentimiento';
+import PantallaConsentimientoCampo from '@/components/presentismo/PantallaConsentimientoCampo';
 import PanelMarcado from '@/components/presentismo/PanelMarcado';
 import BadgeResultado from '@/components/presentismo/BadgeResultado';
 import RegistroPush from '@/components/presentismo/RegistroPush';
@@ -26,6 +27,21 @@ export default async function PresentismoHomePage() {
   }
 
   const supabase = await crearClienteServidor();
+
+  if (!sesion.perfil.consentimiento_flotante_aceptado_at) {
+    const { data: asignacionFlotante } = await supabase
+      .from('empleado_sedes')
+      .select('id')
+      .eq('empleado_id', sesion.userId)
+      .eq('es_flotante', true)
+      .limit(1)
+      .maybeSingle();
+
+    if (asignacionFlotante) {
+      return <PantallaConsentimientoCampo />;
+    }
+  }
+
   const { inicio, fin } = rangoDiaActualISO();
 
   const { data: marcacionesHoy } = await supabase

@@ -9,6 +9,7 @@ interface CuerpoAsignacion {
   diasSemana?: number[];
   horaInicio?: string;
   horaFin?: string;
+  esFlotante?: boolean;
 }
 
 export async function POST(request: Request) {
@@ -25,7 +26,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'body_invalido' }, { status: 400 });
   }
 
-  const { empleadoId, sedeId, diasSemana, horaInicio, horaFin } = body;
+  const { empleadoId, sedeId, diasSemana, horaInicio, horaFin, esFlotante } = body;
   if (
     !empleadoId ||
     !sedeId ||
@@ -46,6 +47,7 @@ export async function POST(request: Request) {
       dias_semana: diasSemana,
       hora_inicio: horaInicio,
       hora_fin: horaFin,
+      es_flotante: esFlotante === true,
     })
     .select()
     .single();

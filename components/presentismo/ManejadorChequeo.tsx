@@ -51,7 +51,9 @@ export default function ManejadorChequeo() {
       setMensaje(
         chequeo.estado === 'confirmado_dentro'
           ? 'Ubicación confirmada, todo en orden.'
-          : 'Ubicación confirmada — quedó registrado que estabas fuera del área asignada.'
+          : chequeo.estado === 'confirmado_campo'
+            ? 'Ubicación registrada.'
+            : 'Ubicación confirmada — quedó registrado que estabas fuera del área asignada.'
       );
     }
 

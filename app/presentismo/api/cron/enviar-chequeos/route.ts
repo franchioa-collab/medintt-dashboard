@@ -105,6 +105,7 @@ export async function POST(request: Request) {
         enviado_en: ahora.toISOString(),
         vence_en: venceEn,
         estado: 'pendiente',
+        es_flotante: asignacion.es_flotante,
       })
       .select()
       .single();

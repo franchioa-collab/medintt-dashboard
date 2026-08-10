@@ -16,6 +16,11 @@ const ITEMS: { href: string; label: string; roles: RolUsuario[] }[] = [
     label: 'Presentismo del equipo',
     roles: ['super_admin', 'admin', 'supervisor_sede'],
   },
+  {
+    href: '/presentismo/admin/reportes',
+    label: 'Reportes',
+    roles: ['super_admin', 'admin', 'supervisor_sede'],
+  },
   { href: '/presentismo/admin/sedes', label: 'Sedes', roles: ['super_admin', 'admin'] },
   { href: '/presentismo/admin/empleados', label: 'Empleados', roles: ['super_admin', 'admin'] },
   { href: '/presentismo/superadmin/clientes', label: 'Empresas clientes', roles: ['super_admin'] },

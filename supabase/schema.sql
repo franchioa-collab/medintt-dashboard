@@ -14,7 +14,9 @@ create extension if not exists "pgcrypto";
 -- clientes nuevas. 'admin' administra una sola empresa cliente puntual.
 create type rol_usuario as enum ('super_admin', 'admin', 'supervisor_sede', 'empleado');
 create type tipo_marcacion as enum ('ingreso', 'egreso');
-create type resultado_validacion as enum ('dentro_de_zona', 'fuera_de_zona');
+-- 'sin_geocerca' es para marcaciones de empleados en trabajo de campo (sede
+-- flotante, Etapa 3): no se compara contra ninguna sede fija.
+create type resultado_validacion as enum ('dentro_de_zona', 'fuera_de_zona', 'sin_geocerca');
 
 -- ---------------------------------------------------------------------
 -- Organizaciones (empresas cliente que contratan el servicio)
@@ -37,6 +39,10 @@ create table perfiles (
   rol rol_usuario not null default 'empleado',
   activo boolean not null default true,
   consentimiento_aceptado_at timestamptz,
+  -- Consentimiento específico para trabajo en campo (Etapa 3): se pide
+  -- aparte porque implica registrar el recorrido del día, más sensible que
+  -- el esquema "dentro/fuera de zona" del consentimiento general.
+  consentimiento_flotante_aceptado_at timestamptz,
   created_at timestamptz not null default now()
 );
 
@@ -70,6 +76,11 @@ create table empleado_sedes (
   dias_semana smallint[] not null default '{1,2,3,4,5}', -- 1=lunes ... 7=domingo
   hora_inicio time not null,
   hora_fin time not null,
+  -- Trabajo en campo (Etapa 3): la sede queda como referencia (dirección
+  -- "base"), pero no se usa como geocerca — ni al marcar ni en los chequeos
+  -- periódicos, que en cambio guardan siempre el punto para armar el
+  -- recorrido del día.
+  es_flotante boolean not null default false,
   created_at timestamptz not null default now(),
   unique (empleado_id, sede_id)
 );
@@ -118,11 +129,13 @@ create index idx_push_subscriptions_empleado on push_subscriptions(empleado_id);
 -- ---------------------------------------------------------------------
 -- Chequeos de ubicación periódicos durante la jornada (Etapa 2).
 -- Se crea uno por aviso push enviado; el empleado lo responde al tocar la
--- notificación. Las coordenadas SOLO se guardan si quedó fuera de zona —
--- si confirma dentro de zona, o no responde a tiempo, nunca se guarda
--- ninguna ubicación, solo el resultado.
+-- notificación. Para empleados con sede fija, las coordenadas SOLO se
+-- guardan si quedó fuera de zona — si confirma dentro de zona, o no
+-- responde a tiempo, nunca se guarda ninguna ubicación, solo el resultado.
+-- Para empleados en trabajo de campo (es_flotante, Etapa 3) el punto se
+-- guarda siempre, para armar el recorrido del día.
 -- ---------------------------------------------------------------------
-create type estado_chequeo as enum ('pendiente', 'confirmado_dentro', 'confirmado_fuera', 'vencido');
+create type estado_chequeo as enum ('pendiente', 'confirmado_dentro', 'confirmado_fuera', 'confirmado_campo', 'vencido');
 
 create table chequeos_ubicacion (
   id uuid primary key default gen_random_uuid(),
@@ -136,6 +149,10 @@ create table chequeos_ubicacion (
   latitud double precision,
   longitud double precision,
   distancia_metros double precision,
+  -- Copiado de empleado_sedes.es_flotante al crear el chequeo, para que
+  -- responder_chequeo() no necesite un join extra para decidir cómo
+  -- procesar la respuesta.
+  es_flotante boolean not null default false,
   created_at timestamptz not null default now()
 );
 
@@ -177,11 +194,26 @@ $$;
 
 grant execute on function aceptar_consentimiento() to authenticated;
 
+-- Igual que aceptar_consentimiento(), pero para el consentimiento
+-- específico de trabajo en campo (Etapa 3): se pide aparte porque implica
+-- registrar el recorrido del día, no solo un resultado dentro/fuera.
+create or replace function aceptar_consentimiento_campo()
+returns void
+language sql security definer
+set search_path = public
+as $$
+  update perfiles set consentimiento_flotante_aceptado_at = now() where id = auth.uid();
+$$;
+
+grant execute on function aceptar_consentimiento_campo() to authenticated;
+
 -- Responde un chequeo de ubicación periódico (Etapa 2): calcula la
 -- distancia server-side (no confía en nada que mande el cliente más que
 -- las coordenadas crudas) y decide el resultado. Solo guarda latitud y
 -- longitud si el empleado quedó fuera de zona; si está dentro, o el
 -- chequeo no le pertenece o ya fue respondido, no graba ubicación.
+-- Para chequeos de trabajo en campo (es_flotante) no hay geocerca contra la
+-- que comparar: el punto se guarda siempre, para el recorrido del día.
 create or replace function responder_chequeo(chequeo_id uuid, lat double precision, lon double precision)
 returns chequeos_ubicacion
 language plpgsql security definer
@@ -199,6 +231,14 @@ begin
 
   if not found then
     raise exception 'chequeo_no_encontrado';
+  end if;
+
+  if fila.es_flotante then
+    update chequeos_ubicacion
+      set estado = 'confirmado_campo', respondido_en = now(), latitud = lat, longitud = lon
+      where id = chequeo_id
+      returning * into fila;
+    return fila;
   end if;
 
   select latitud, longitud, radio_metros into sede_lat, sede_lon, sede_radio

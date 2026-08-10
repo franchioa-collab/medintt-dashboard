@@ -17,6 +17,7 @@ export default function FormularioAsignacion({
   const [diasSemana, setDiasSemana] = useState<number[]>(DIAS_HABILES_DEFAULT);
   const [horaInicio, setHoraInicio] = useState('08:00');
   const [horaFin, setHoraFin] = useState('17:00');
+  const [esFlotante, setEsFlotante] = useState(false);
   const [enviando, setEnviando] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,7 +40,7 @@ export default function FormularioAsignacion({
     const res = await fetch('/presentismo/api/admin/asignaciones', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ empleadoId, sedeId, diasSemana, horaInicio, horaFin }),
+      body: JSON.stringify({ empleadoId, sedeId, diasSemana, horaInicio, horaFin, esFlotante }),
     });
 
     setEnviando(false);
@@ -125,6 +126,19 @@ export default function FormularioAsignacion({
           />
         </div>
       </div>
+
+      <label className="flex items-start gap-2 text-sm text-gray-700">
+        <input
+          type="checkbox"
+          checked={esFlotante}
+          onChange={(e) => setEsFlotante(e.target.checked)}
+          className="mt-0.5"
+        />
+        <span>
+          Trabajo en campo (sin geocerca fija) — no se valida la ubicación contra esta sede; se
+          usa solo como referencia. Requiere que el empleado acepte un consentimiento aparte.
+        </span>
+      </label>
 
       {error && <p className="text-sm text-red-600">{error}</p>}
 

@@ -74,7 +74,14 @@ export default async function DetalleEmpleadoPage({
         {asignaciones.map((a) => (
           <div key={a.id} className="p-4 flex items-center justify-between text-sm">
             <div>
-              <p className="font-medium text-gray-800">{a.sede.nombre}</p>
+              <p className="font-medium text-gray-800 flex items-center gap-1.5">
+                {a.sede.nombre}
+                {a.es_flotante && (
+                  <span className="px-1.5 py-0.5 rounded bg-lila/20 text-lila text-xs font-medium">
+                    Campo
+                  </span>
+                )}
+              </p>
               <p className="text-gray-500">
                 {nombresDias(a.dias_semana)} · {a.hora_inicio.slice(0, 5)} a {a.hora_fin.slice(0, 5)}
               </p>

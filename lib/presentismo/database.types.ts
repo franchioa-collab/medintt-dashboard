@@ -6,7 +6,9 @@
 // clientes nuevas. 'admin' administra una sola empresa cliente puntual.
 export type RolUsuario = 'super_admin' | 'admin' | 'supervisor_sede' | 'empleado';
 export type TipoMarcacion = 'ingreso' | 'egreso';
-export type ResultadoValidacion = 'dentro_de_zona' | 'fuera_de_zona';
+// 'sin_geocerca' es para marcaciones de trabajo en campo (Etapa 3): no se
+// compara contra ninguna sede fija.
+export type ResultadoValidacion = 'dentro_de_zona' | 'fuera_de_zona' | 'sin_geocerca';
 
 export interface Organizacion {
   id: string;
@@ -23,6 +25,7 @@ export interface Perfil {
   rol: RolUsuario;
   activo: boolean;
   consentimiento_aceptado_at: string | null;
+  consentimiento_flotante_aceptado_at: string | null;
   created_at: string;
 }
 
@@ -44,6 +47,7 @@ export interface EmpleadoSede {
   dias_semana: number[];
   hora_inicio: string;
   hora_fin: string;
+  es_flotante: boolean;
   created_at: string;
 }
 
@@ -64,9 +68,16 @@ export interface Marcacion {
 }
 
 // 'pendiente' = avisado, esperando respuesta. 'confirmado_dentro'/'confirmado_fuera'
-// = el empleado tocó el aviso y se comparó su ubicación contra la sede. 'vencido'
-// = no respondió a tiempo. Solo confirmado_fuera guarda latitud/longitud.
-export type EstadoChequeo = 'pendiente' | 'confirmado_dentro' | 'confirmado_fuera' | 'vencido';
+// = el empleado tocó el aviso y se comparó su ubicación contra la sede.
+// 'confirmado_campo' = chequeo de trabajo en campo (sin geocerca), siempre
+// guarda el punto. 'vencido' = no respondió a tiempo. De los que sí tienen
+// geocerca, solo confirmado_fuera guarda latitud/longitud.
+export type EstadoChequeo =
+  | 'pendiente'
+  | 'confirmado_dentro'
+  | 'confirmado_fuera'
+  | 'confirmado_campo'
+  | 'vencido';
 
 export interface PushSubscriptionRow {
   id: string;
@@ -89,6 +100,7 @@ export interface ChequeoUbicacion {
   latitud: number | null;
   longitud: number | null;
   distancia_metros: number | null;
+  es_flotante: boolean;
   created_at: string;
 }
 

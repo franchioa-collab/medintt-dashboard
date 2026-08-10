@@ -1,6 +1,11 @@
 import { NextResponse } from 'next/server';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
-import { evaluarUbicacionContraSedes, esTarde, type AsignacionConSede } from '@/lib/presentismo/geo';
+import {
+  evaluarUbicacionContraSedes,
+  esTarde,
+  sedesVigentesHoy,
+  type AsignacionConSede,
+} from '@/lib/presentismo/geo';
 import type { EmpleadoSede, Sede } from '@/lib/presentismo/database.types';
 
 interface CuerpoMarcar {
@@ -49,11 +54,25 @@ export async function POST(request: Request) {
     .filter((a: EmpleadoSede & { sede: Sede | null }) => a.sede)
     .map((a: EmpleadoSede & { sede: Sede | null }) => ({ asignacion: a, sede: a.sede as Sede }));
 
-  const evaluacion = evaluarUbicacionContraSedes(asignaciones, lat, lon);
-
   const ahora = new Date();
-  const tarde =
-    tipo === 'ingreso' && evaluacion ? esTarde(ahora, evaluacion.asignacion.hora_inicio) : false;
+
+  // Trabajo en campo (Etapa 3): si alguna asignación vigente hoy es
+  // flotante, no se evalúa geocerca — se acepta la marcación desde
+  // cualquier lugar. La sede de la asignación queda solo como referencia.
+  const asignacionFlotante = sedesVigentesHoy(asignaciones, ahora).find(
+    ({ asignacion }) => asignacion.es_flotante
+  );
+
+  const evaluacion = asignacionFlotante ? null : evaluarUbicacionContraSedes(asignaciones, lat, lon, ahora);
+
+  const horaInicioReferencia = asignacionFlotante?.asignacion.hora_inicio ?? evaluacion?.asignacion.hora_inicio;
+  const tarde = tipo === 'ingreso' && horaInicioReferencia ? esTarde(ahora, horaInicioReferencia) : false;
+
+  const resultado: 'dentro_de_zona' | 'fuera_de_zona' | 'sin_geocerca' = asignacionFlotante
+    ? 'sin_geocerca'
+    : evaluacion?.dentroDeZona
+      ? 'dentro_de_zona'
+      : 'fuera_de_zona';
 
   const { data: marcacion, error } = await supabase
     .from('marcaciones')
@@ -65,9 +84,9 @@ export async function POST(request: Request) {
       latitud: lat,
       longitud: lon,
       precision_metros: precisionMetros ?? null,
-      sede_id: evaluacion?.sede.id ?? null,
-      distancia_metros: evaluacion?.distanciaMetros ?? null,
-      resultado: evaluacion?.dentroDeZona ? 'dentro_de_zona' : 'fuera_de_zona',
+      sede_id: asignacionFlotante?.sede.id ?? evaluacion?.sede.id ?? null,
+      distancia_metros: asignacionFlotante ? null : (evaluacion?.distanciaMetros ?? null),
+      resultado,
       tarde,
     })
     .select()
