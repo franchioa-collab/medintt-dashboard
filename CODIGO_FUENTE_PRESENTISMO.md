@@ -1,9 +1,10 @@
 # Código fuente completo — Módulo de Presentismo
 
 Este documento junta, en un solo archivo, el código completo del módulo de
-presentismo (Etapa 1 + Etapa 2 + Etapa 3) tal como está desplegado en
-producción a la fecha de este documento. Sirve como respaldo de referencia y
-como material de consulta para replicarlo o modificarlo.
+presentismo (Etapa 1 + Etapa 2 + Etapa 3 + carga masiva de empleados) tal
+como está desplegado en producción a la fecha de este documento. Sirve como
+respaldo de referencia y como material de consulta para replicarlo o
+modificarlo.
 
 **Importante**: la copia viva y actualizada del código está en el repositorio
 de GitHub (`franchioa-collab/medintt-dashboard`, rama `main`). Este documento
@@ -14,9 +15,25 @@ documento.
 
 ## Qué incluye esta versión
 
-Respecto de la versión anterior (Etapa 1 + Etapa 2), esta actualización
-agrega todo lo construido en la Etapa 3 — vista diaria de presentismo con
-exportación CSV, y trabajo en campo (sede flotante):
+Respecto de la versión anterior (Etapa 1 + Etapa 2 + Etapa 3), esta
+actualización agrega la carga masiva de empleados por CSV — pensada para
+cuando un cliente nuevo trae su propia base de RRHH y no quiere cargar
+empleado por empleado:
+
+- `lib/presentismo/empleados.ts` — `crearEmpleado()`, la lógica compartida
+  (usuario de auth + perfil, con rollback si falla) que usan tanto el alta
+  individual como la masiva.
+- `app/presentismo/api/admin/empleados/masivo/route.ts` — recibe filas ya
+  parseadas y validadas del lado del cliente, crea hasta 200 por tanda.
+- `components/presentismo/admin/CargaMasivaEmpleados.tsx` — parsea el CSV en
+  el navegador (detecta `,` o `;`, reconoce nombres de columna flexibles),
+  muestra una vista previa con errores por fila antes de mandar nada, y al
+  final deja descargar un CSV con las contraseñas temporales.
+
+## Qué incluía la Etapa 3
+
+Vista diaria de presentismo con exportación CSV, y trabajo en campo (sede
+flotante):
 
 - `lib/presentismo/reportes.ts` — arma, por empleado, el estado del día (a
   horario / tarde / fuera de zona / campo / ausente) a partir de las
@@ -2998,6 +3015,7 @@ import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteAdmin } from '@/lib/presentismo/supabase-server';
 import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
 import FormularioEmpleado from '@/components/presentismo/admin/FormularioEmpleado';
+import CargaMasivaEmpleados from '@/components/presentismo/admin/CargaMasivaEmpleados';
 import type { Perfil } from '@/lib/presentismo/database.types';
 
 const NOMBRES_ROL: Record<Perfil['rol'], string> = {
@@ -3028,6 +3046,8 @@ export default async function EmpleadosPage() {
       <h1 className="text-xl font-bold text-navy">Empleados</h1>
 
       <FormularioEmpleado />
+
+      <CargaMasivaEmpleados />
 
       <div className="bg-white rounded-lg shadow-md divide-y divide-gray-100">
         {empleados.map((emp) => (
@@ -3672,23 +3692,14 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 ```ts
 import { NextResponse } from 'next/server';
 import { obtenerSesionActual } from '@/lib/presentismo/sesion';
-import { crearClienteAdmin } from '@/lib/presentismo/supabase-server';
 import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
+import { crearEmpleado, ROLES_VALIDOS_NUEVO_EMPLEADO } from '@/lib/presentismo/empleados';
 import type { RolUsuario } from '@/lib/presentismo/database.types';
-
-// A propósito sin 'super_admin' acá: un admin de empresa cliente nunca debe
-// poder crear otro super_admin (sería escalar privilegios a nivel plataforma).
-const ROLES_VALIDOS: RolUsuario[] = ['admin', 'supervisor_sede', 'empleado'];
 
 interface CuerpoEmpleado {
   nombreCompleto?: string;
   email?: string;
   rol?: RolUsuario;
-}
-
-function generarPasswordTemporal(): string {
-  const azar = () => Math.random().toString(36).slice(-4);
-  return `${azar()}${azar()}-${azar()}`;
 }
 
 export async function POST(request: Request) {
@@ -3706,38 +3717,18 @@ export async function POST(request: Request) {
   }
 
   const { nombreCompleto, email, rol } = body;
-  if (!nombreCompleto || !email || !rol || !ROLES_VALIDOS.includes(rol)) {
+  if (!nombreCompleto || !email || !rol || !ROLES_VALIDOS_NUEVO_EMPLEADO.includes(rol)) {
     return NextResponse.json({ error: 'datos_invalidos' }, { status: 400 });
   }
 
-  const passwordTemporal = generarPasswordTemporal();
-  const admin = crearClienteAdmin();
+  const resultado = await crearEmpleado(sesion.organizacion.id, { nombreCompleto, email, rol });
 
-  const { data: nuevoUsuario, error: errorCreandoUsuario } = await admin.auth.admin.createUser({
-    email,
-    password: passwordTemporal,
-    email_confirm: true,
-  });
-
-  if (errorCreandoUsuario || !nuevoUsuario?.user) {
-    const enUso = errorCreandoUsuario?.message?.toLowerCase().includes('already');
-    return NextResponse.json({ error: enUso ? 'email_en_uso' : 'error_creando_usuario' }, { status: 400 });
+  if (!resultado.ok) {
+    const status = resultado.error === 'email_en_uso' ? 400 : 500;
+    return NextResponse.json({ error: resultado.error }, { status });
   }
 
-  const { error: errorPerfil } = await admin.from('perfiles').insert({
-    id: nuevoUsuario.user.id,
-    organizacion_id: sesion.organizacion.id,
-    nombre_completo: nombreCompleto,
-    rol,
-    activo: true,
-  });
-
-  if (errorPerfil) {
-    await admin.auth.admin.deleteUser(nuevoUsuario.user.id);
-    return NextResponse.json({ error: 'error_creando_perfil' }, { status: 500 });
-  }
-
-  return NextResponse.json({ passwordTemporal });
+  return NextResponse.json({ passwordTemporal: resultado.passwordTemporal });
 }
 ```
 
@@ -4463,6 +4454,493 @@ export async function POST() {
   }
 
   return NextResponse.json({ ok: true });
+}
+```
+
+## `lib/presentismo/empleados.ts`
+
+```ts
+import { crearClienteAdmin } from './supabase-server';
+import type { RolUsuario } from './database.types';
+
+// A propósito sin 'super_admin' acá: un admin de empresa cliente nunca debe
+// poder crear otro super_admin (sería escalar privilegios a nivel plataforma).
+export const ROLES_VALIDOS_NUEVO_EMPLEADO: RolUsuario[] = ['admin', 'supervisor_sede', 'empleado'];
+
+function generarPasswordTemporal(): string {
+  const azar = () => Math.random().toString(36).slice(-4);
+  return `${azar()}${azar()}-${azar()}`;
+}
+
+export interface DatosNuevoEmpleado {
+  nombreCompleto: string;
+  email: string;
+  rol: RolUsuario;
+}
+
+export type ResultadoCrearEmpleado =
+  | { ok: true; passwordTemporal: string }
+  | { ok: false; error: 'email_en_uso' | 'error_creando_usuario' | 'error_creando_perfil' };
+
+/**
+ * Crea el usuario de auth y su perfil para un empleado nuevo. Usada tanto
+ * por el alta individual como por la carga masiva — mismo camino, mismas
+ * reglas (rollback del usuario de auth si falla el perfil).
+ */
+export async function crearEmpleado(
+  organizacionId: string,
+  datos: DatosNuevoEmpleado,
+  admin: ReturnType<typeof crearClienteAdmin> = crearClienteAdmin()
+): Promise<ResultadoCrearEmpleado> {
+  const passwordTemporal = generarPasswordTemporal();
+
+  const { data: nuevoUsuario, error: errorCreandoUsuario } = await admin.auth.admin.createUser({
+    email: datos.email,
+    password: passwordTemporal,
+    email_confirm: true,
+  });
+
+  if (errorCreandoUsuario || !nuevoUsuario?.user) {
+    const enUso = errorCreandoUsuario?.message?.toLowerCase().includes('already');
+    return { ok: false, error: enUso ? 'email_en_uso' : 'error_creando_usuario' };
+  }
+
+  const { error: errorPerfil } = await admin.from('perfiles').insert({
+    id: nuevoUsuario.user.id,
+    organizacion_id: organizacionId,
+    nombre_completo: datos.nombreCompleto,
+    rol: datos.rol,
+    activo: true,
+  });
+
+  if (errorPerfil) {
+    await admin.auth.admin.deleteUser(nuevoUsuario.user.id);
+    return { ok: false, error: 'error_creando_perfil' };
+  }
+
+  return { ok: true, passwordTemporal };
+}
+```
+
+## `app/presentismo/api/admin/empleados/masivo/route.ts`
+
+```ts
+import { NextResponse } from 'next/server';
+import { obtenerSesionActual } from '@/lib/presentismo/sesion';
+import { crearClienteAdmin } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
+import { crearEmpleado, ROLES_VALIDOS_NUEVO_EMPLEADO } from '@/lib/presentismo/empleados';
+import type { RolUsuario } from '@/lib/presentismo/database.types';
+
+export const maxDuration = 60;
+
+// Tope por tanda: cada alta hace dos viajes a Supabase (usuario + perfil) de
+// forma secuencial, así que una tanda muy grande puede pasarse del límite de
+// duración de la función serverless. Para bases más grandes, dividir el CSV
+// en varios archivos.
+const MAX_FILAS = 200;
+
+interface FilaEntrada {
+  nombreCompleto?: string;
+  email?: string;
+  rol?: string;
+}
+
+interface ResultadoFila {
+  email: string;
+  ok: boolean;
+  passwordTemporal?: string;
+  error?: string;
+}
+
+export async function POST(request: Request) {
+  const sesion = await obtenerSesionActual();
+  if (!sesion) return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol)) {
+    return NextResponse.json({ error: 'no_autorizado' }, { status: 403 });
+  }
+
+  let body: { filas?: FilaEntrada[] };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: 'body_invalido' }, { status: 400 });
+  }
+
+  const filas = body.filas;
+  if (!Array.isArray(filas) || filas.length === 0) {
+    return NextResponse.json({ error: 'sin_filas' }, { status: 400 });
+  }
+  if (filas.length > MAX_FILAS) {
+    return NextResponse.json({ error: 'demasiadas_filas', maximo: MAX_FILAS }, { status: 400 });
+  }
+
+  const admin = crearClienteAdmin();
+  const resultados: ResultadoFila[] = [];
+
+  for (const fila of filas) {
+    const nombreCompleto = fila.nombreCompleto?.trim();
+    const email = fila.email?.trim().toLowerCase();
+    const rol = (fila.rol?.trim() || 'empleado') as RolUsuario;
+
+    if (!nombreCompleto || !email) {
+      resultados.push({ email: email ?? '', ok: false, error: 'faltan_datos' });
+      continue;
+    }
+    if (!ROLES_VALIDOS_NUEVO_EMPLEADO.includes(rol)) {
+      resultados.push({ email, ok: false, error: 'rol_invalido' });
+      continue;
+    }
+
+    // Secuencial a propósito: evita saturar la API de auth de Supabase con
+    // decenas de altas en paralelo y mantiene simple el rollback por fila.
+    const resultado = await crearEmpleado(sesion.organizacion.id, { nombreCompleto, email, rol }, admin);
+
+    resultados.push(
+      resultado.ok
+        ? { email, ok: true, passwordTemporal: resultado.passwordTemporal }
+        : { email, ok: false, error: resultado.error }
+    );
+  }
+
+  return NextResponse.json({ resultados });
+}
+```
+
+## `components/presentismo/admin/CargaMasivaEmpleados.tsx`
+
+```tsx
+'use client';
+
+import { useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import type { RolUsuario } from '@/lib/presentismo/database.types';
+
+const ALIAS_NOMBRE = ['nombre', 'nombrecompleto', 'nombreyapellido', 'empleado'];
+const ALIAS_EMAIL = ['email', 'correo', 'mail', 'correoelectronico'];
+const ALIAS_ROL = ['rol', 'role', 'perfil'];
+
+const ETIQUETAS_ROL: Record<string, RolUsuario> = {
+  empleado: 'empleado',
+  supervisor: 'supervisor_sede',
+  supervisordesede: 'supervisor_sede',
+  admin: 'admin',
+  administrador: 'admin',
+};
+
+const REGEX_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function normalizarEncabezado(texto: string) {
+  return texto
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\s_]/g, '');
+}
+
+/** Parser CSV mínimo: soporta comillas y campos con comas/punto y coma adentro. */
+function parsearCsv(texto: string, separador: string): string[][] {
+  const filas: string[][] = [];
+  let fila: string[] = [];
+  let campo = '';
+  let entreComillas = false;
+
+  for (let i = 0; i < texto.length; i++) {
+    const c = texto[i];
+    if (entreComillas) {
+      if (c === '"') {
+        if (texto[i + 1] === '"') {
+          campo += '"';
+          i++;
+        } else {
+          entreComillas = false;
+        }
+      } else {
+        campo += c;
+      }
+    } else if (c === '"') {
+      entreComillas = true;
+    } else if (c === separador) {
+      fila.push(campo);
+      campo = '';
+    } else if (c === '\n' || c === '\r') {
+      if (c === '\r' && texto[i + 1] === '\n') i++;
+      fila.push(campo);
+      filas.push(fila);
+      fila = [];
+      campo = '';
+    } else {
+      campo += c;
+    }
+  }
+  if (campo !== '' || fila.length > 0) {
+    fila.push(campo);
+    filas.push(fila);
+  }
+  return filas.filter((f) => f.some((c) => c.trim() !== ''));
+}
+
+interface FilaPrevia {
+  nombreCompleto: string;
+  email: string;
+  rol: RolUsuario;
+  error: string | null;
+}
+
+interface ResultadoFila {
+  email: string;
+  ok: boolean;
+  passwordTemporal?: string;
+  error?: string;
+}
+
+const MENSAJES_ERROR: Record<string, string> = {
+  faltan_datos: 'Faltan datos',
+  rol_invalido: 'Rol inválido',
+  email_en_uso: 'Email ya registrado',
+  error_creando_usuario: 'No se pudo crear el usuario',
+  error_creando_perfil: 'No se pudo crear el perfil',
+};
+
+function celda(valor: string) {
+  return `"${valor.replace(/"/g, '""')}"`;
+}
+
+function descargarTexto(nombreArchivo: string, contenido: string) {
+  const blob = new Blob(['﻿' + contenido], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = nombreArchivo;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export default function CargaMasivaEmpleados() {
+  const router = useRouter();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [abierto, setAbierto] = useState(false);
+  const [filas, setFilas] = useState<FilaPrevia[]>([]);
+  const [errorArchivo, setErrorArchivo] = useState<string | null>(null);
+  const [enviando, setEnviando] = useState(false);
+  const [resultados, setResultados] = useState<ResultadoFila[] | null>(null);
+
+  function descargarPlantilla() {
+    descargarTexto(
+      'plantilla_empleados.csv',
+      'nombre_completo,email,rol\r\nAna García,ana.garcia@empresa.com,empleado\r\nJuan Pérez,juan.perez@empresa.com,supervisor_sede\r\n'
+    );
+  }
+
+  function manejarArchivo(e: React.ChangeEvent<HTMLInputElement>) {
+    const archivo = e.target.files?.[0];
+    if (!archivo) return;
+
+    setErrorArchivo(null);
+    setResultados(null);
+
+    const lector = new FileReader();
+    lector.onload = () => {
+      const texto = String(lector.result ?? '');
+      const primeraLinea = texto.split(/\r?\n/, 1)[0] ?? '';
+      const separador = (primeraLinea.match(/;/g)?.length ?? 0) > (primeraLinea.match(/,/g)?.length ?? 0) ? ';' : ',';
+      const filasCsv = parsearCsv(texto, separador);
+
+      if (filasCsv.length < 2) {
+        setErrorArchivo('El archivo no tiene filas de datos.');
+        return;
+      }
+
+      const encabezados = filasCsv[0].map(normalizarEncabezado);
+      const idxNombre = encabezados.findIndex((h) => ALIAS_NOMBRE.includes(h));
+      const idxEmail = encabezados.findIndex((h) => ALIAS_EMAIL.includes(h));
+      const idxRol = encabezados.findIndex((h) => ALIAS_ROL.includes(h));
+
+      if (idxNombre === -1 || idxEmail === -1) {
+        setErrorArchivo(
+          'No encontramos las columnas de nombre y email. Descargá la plantilla para ver el formato esperado.'
+        );
+        return;
+      }
+
+      const emailsVistos = new Set<string>();
+      const filasParseadas: FilaPrevia[] = filasCsv.slice(1).map((fila) => {
+        const nombreCompleto = (fila[idxNombre] ?? '').trim();
+        const email = (fila[idxEmail] ?? '').trim().toLowerCase();
+        const rolCrudo = idxRol >= 0 ? normalizarEncabezado(fila[idxRol] ?? '') : '';
+        const rol = (rolCrudo ? ETIQUETAS_ROL[rolCrudo] : 'empleado') ?? null;
+
+        let error: string | null = null;
+        if (!nombreCompleto) error = 'Falta el nombre';
+        else if (!email) error = 'Falta el email';
+        else if (!REGEX_EMAIL.test(email)) error = 'Email inválido';
+        else if (rolCrudo && !rol) error = 'Rol no reconocido';
+        else if (emailsVistos.has(email)) error = 'Email duplicado en el archivo';
+
+        if (!error) emailsVistos.add(email);
+
+        return { nombreCompleto, email, rol: rol ?? 'empleado', error };
+      });
+
+      setFilas(filasParseadas);
+    };
+    lector.readAsText(archivo, 'utf-8');
+  }
+
+  async function crearEmpleados() {
+    const validas = filas.filter((f) => !f.error);
+    if (validas.length === 0) return;
+
+    setEnviando(true);
+    const res = await fetch('/presentismo/api/admin/empleados/masivo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filas: validas.map((f) => ({ nombreCompleto: f.nombreCompleto, email: f.email, rol: f.rol })),
+      }),
+    });
+    setEnviando(false);
+
+    if (!res.ok) {
+      setErrorArchivo('No pudimos procesar la carga. Probá de nuevo o con un archivo más chico.');
+      return;
+    }
+
+    const { resultados: nuevosResultados } = await res.json();
+    setResultados(nuevosResultados);
+    router.refresh();
+  }
+
+  function descargarResultados() {
+    if (!resultados) return;
+    const encabezado = ['Nombre', 'Email', 'Estado', 'Contraseña temporal'];
+    const nombrePorEmail = new Map(filas.map((f) => [f.email, f.nombreCompleto]));
+    const lineas = [
+      encabezado,
+      ...resultados.map((r) => [
+        nombrePorEmail.get(r.email) ?? '',
+        r.email,
+        r.ok ? 'Creado' : (MENSAJES_ERROR[r.error ?? ''] ?? 'Error'),
+        r.passwordTemporal ?? '',
+      ]),
+    ].map((f) => f.map(celda).join(';'));
+    descargarTexto('empleados_creados.csv', lineas.join('\r\n') + '\r\n');
+  }
+
+  function reiniciar() {
+    setFilas([]);
+    setResultados(null);
+    setErrorArchivo(null);
+    if (inputRef.current) inputRef.current.value = '';
+  }
+
+  if (!abierto) {
+    return (
+      <button
+        onClick={() => setAbierto(true)}
+        className="text-sm text-celeste underline"
+      >
+        Carga masiva por CSV
+      </button>
+    );
+  }
+
+  const validas = filas.filter((f) => !f.error);
+  const invalidas = filas.filter((f) => f.error);
+
+  return (
+    <div className="bg-white rounded-lg shadow-md p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-bold text-gray-700">Carga masiva por CSV</h2>
+        <button onClick={() => { setAbierto(false); reiniciar(); }} className="text-xs text-gray-500 underline">
+          Cerrar
+        </button>
+      </div>
+
+      <p className="text-sm text-gray-600">
+        Subí un CSV con las columnas <span className="font-mono">nombre_completo</span>,{' '}
+        <span className="font-mono">email</span> y opcionalmente{' '}
+        <span className="font-mono">rol</span> (empleado / supervisor_sede / admin — si se omite,
+        queda como empleado).{' '}
+        <button onClick={descargarPlantilla} className="text-celeste underline">
+          Descargar plantilla
+        </button>
+      </p>
+
+      {!resultados && (
+        <>
+          <input ref={inputRef} type="file" accept=".csv,text/csv" onChange={manejarArchivo} className="text-sm" />
+
+          {errorArchivo && <p className="text-sm text-red-600">{errorArchivo}</p>}
+
+          {filas.length > 0 && (
+            <>
+              <p className="text-sm text-gray-700">
+                {validas.length} fila{validas.length === 1 ? '' : 's'} lista
+                {validas.length === 1 ? '' : 's'} para crear
+                {invalidas.length > 0 && `, ${invalidas.length} con error (no se van a crear)`}.
+              </p>
+
+              <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-md divide-y divide-gray-100">
+                {filas.map((f, i) => (
+                  <div key={i} className="px-3 py-2 flex items-center justify-between text-xs gap-2">
+                    <div className="min-w-0">
+                      <p className="font-medium text-gray-800 truncate">{f.nombreCompleto || '(sin nombre)'}</p>
+                      <p className="text-gray-500 truncate">{f.email || '(sin email)'}</p>
+                    </div>
+                    <span className={f.error ? 'text-red-600 shrink-0' : 'text-green-700 shrink-0'}>
+                      {f.error ?? 'OK'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <button
+                onClick={crearEmpleados}
+                disabled={enviando || validas.length === 0}
+                className="bg-navy text-white rounded-md px-4 py-2 text-sm font-medium disabled:opacity-50"
+              >
+                {enviando ? 'Creando…' : `Crear ${validas.length} empleado${validas.length === 1 ? '' : 's'}`}
+              </button>
+            </>
+          )}
+        </>
+      )}
+
+      {resultados && (
+        <>
+          <p className="text-sm text-gray-700">
+            {resultados.filter((r) => r.ok).length} de {resultados.length} empleados creados.
+          </p>
+          <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-md divide-y divide-gray-100">
+            {resultados.map((r, i) => (
+              <div key={i} className="px-3 py-2 flex items-center justify-between text-xs gap-2">
+                <span className="text-gray-700 truncate">{r.email}</span>
+                <span className={r.ok ? 'text-green-700 shrink-0' : 'text-red-600 shrink-0'}>
+                  {r.ok ? 'Creado' : (MENSAJES_ERROR[r.error ?? ''] ?? 'Error')}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={descargarResultados}
+              className="bg-navy text-white rounded-md px-4 py-2 text-sm font-medium"
+            >
+              Descargar CSV con las contraseñas
+            </button>
+            <button onClick={reiniciar} className="text-sm text-celeste underline">
+              Cargar otro archivo
+            </button>
+          </div>
+          <p className="text-xs text-gray-500">
+            Compartí las contraseñas de forma segura. Cada empleado puede cambiar la suya desde su cuenta.
+          </p>
+        </>
+      )}
+    </div>
+  );
 }
 ```
 
