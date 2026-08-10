@@ -93,7 +93,11 @@ build, así que un cambio de variable sola no alcanza, hace falta redeploy).
 - Las marcaciones son inmutables por diseño: nadie —ni siquiera vos con acceso admin
   de Supabase, salvo que uses la consola SQL directamente— puede editarlas ni borrarlas
   desde la app.
-- No se guarda un historial continuo de posición, solo los eventos de marcado.
+- No se guarda un historial continuo de posición, solo los eventos de marcado —
+  excepto para empleados marcados como "trabajo en campo" (Etapa 3), a quienes
+  sí se les registra un punto por cada chequeo periódico durante su horario
+  laboral asignado, nunca fuera de ese horario, y solo después de que acepten
+  un consentimiento específico que se lo explica.
 - Si algún cliente pide dar de baja sus datos (derecho de supresión), se hace borrando
   su fila de `organizaciones` (con `on delete cascade` se lleva puestos perfiles, sedes,
   asignaciones y marcaciones de esa empresa — es irreversible, pedí confirmación por
@@ -115,8 +119,18 @@ Según el plan original en 3 etapas:
   tiempo, queda una alerta visible en "Presentismo del equipo" para el admin/supervisor,
   y solo en ese caso se guarda la coordenada. El disparador horario corre gratis en la
   base de Supabase (`pg_cron`, ver `supabase/schema.sql`), no en Vercel.
-- **Etapa 3 (pendiente)**: vista de presentismo por día con estados (a horario /
-  tarde / fuera de zona / ausente) y exportación CSV/Excel para nómina.
+- **Etapa 3 (hecha)**: dos cosas.
+  - **Reportes**: pantalla nueva ("Reportes" en el menú) con selector de fecha,
+    el estado de cada empleado ese día (a horario / tarde / fuera de zona /
+    campo / ausente) y un botón para descargar un CSV listo para nómina.
+  - **Trabajo en campo (sede flotante)**: al crear una asignación se puede
+    marcar "Trabajo en campo" — el empleado deja de tener geocerca (marca
+    ingreso/egreso desde cualquier lado) y los chequeos periódicos de la
+    Etapa 2 le guardan la ubicación siempre, no solo si se aleja, armando el
+    recorrido del día (visible desde "Reportes"). Como esto es más sensible
+    que el esquema dentro/fuera general, al empleado se le pide un
+    consentimiento aparte, específico para el recorrido, antes de dejarlo
+    volver a marcar.
 
 ## 7. Soporte de la infraestructura
 
