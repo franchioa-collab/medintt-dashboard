@@ -1,9 +1,9 @@
 # Código fuente completo — Módulo de Presentismo
 
 Este documento junta, en un solo archivo, el código completo del módulo de
-presentismo (Etapa 1 + Etapa 2) tal como está desplegado en producción a la
-fecha de este documento. Sirve como respaldo de referencia y como material de
-consulta para replicarlo o modificarlo.
+presentismo (Etapa 1 + Etapa 2 + Etapa 3) tal como está desplegado en
+producción a la fecha de este documento. Sirve como respaldo de referencia y
+como material de consulta para replicarlo o modificarlo.
 
 **Importante**: la copia viva y actualizada del código está en el repositorio
 de GitHub (`franchioa-collab/medintt-dashboard`, rama `main`). Este documento
@@ -14,14 +14,46 @@ documento.
 
 ## Qué incluye esta versión
 
-Respecto de la primera versión de este documento (solo Etapa 1), esta
-actualización agrega todo lo construido en la Etapa 2 — chequeos periódicos
-por notificación push durante la jornada laboral:
+Respecto de la versión anterior (Etapa 1 + Etapa 2), esta actualización
+agrega todo lo construido en la Etapa 3 — vista diaria de presentismo con
+exportación CSV, y trabajo en campo (sede flotante):
+
+- `lib/presentismo/reportes.ts` — arma, por empleado, el estado del día (a
+  horario / tarde / fuera de zona / campo / ausente) a partir de las
+  asignaciones vigentes y las marcaciones de la fecha elegida.
+- `app/presentismo/(app)/admin/reportes/page.tsx` y
+  `components/presentismo/admin/SelectorFechaReporte.tsx` — la pantalla de
+  reportes con selector de fecha.
+- `app/presentismo/api/admin/reportes/csv/route.ts` — descarga en CSV
+  (separado por `;`, con BOM UTF-8) lista para nómina.
+- `app/presentismo/(app)/admin/reportes/recorrido/[empleadoId]/page.tsx` —
+  lista de puntos del recorrido de un empleado en campo, con link a Google
+  Maps por punto.
+- `empleado_sedes.es_flotante`: marca una asignación como trabajo en campo —
+  se salta la geovalidación al marcar y los chequeos periódicos de la Etapa 2
+  guardan siempre el punto (no solo si se aleja), copiando el flag a
+  `chequeos_ubicacion.es_flotante` para no necesitar joins extra.
+- Nuevo estado `confirmado_campo` (`estado_chequeo`) y resultado
+  `sin_geocerca` (`resultado_validacion`), y una rama nueva en la función
+  `responder_chequeo()` para el caso flotante (guarda el punto siempre, sin
+  comparar contra ninguna sede).
+- `components/presentismo/PantallaConsentimientoCampo.tsx` y
+  `app/presentismo/api/consentimiento-campo/route.ts` — consentimiento
+  específico que se le pide al empleado antes de dejarlo marcar si tiene
+  alguna asignación de trabajo en campo, dado que implica guardar su
+  recorrido durante el horario laboral (más sensible que el esquema
+  dentro/fuera general).
+
+## Qué incluía la Etapa 2
+
+Chequeos periódicos por notificación push durante la jornada laboral:
 
 - `lib/presentismo/push.ts` — envío de notificaciones push (VAPID/web-push).
 - `hooks/usePush.ts` y `components/presentismo/RegistroPush.tsx` — alta de
-  suscripción push del lado del empleado.
-- `public/presentismo/sw.js` — service worker que recibe y muestra el push.
+  suscripción push del lado del empleado, con resincronización automática si
+  el navegador ya tenía una suscripción que el servidor no llegó a guardar.
+- `public/presentismo/sw.js` — service worker que recibe y muestra el push, y
+  abre la app con `clients.openWindow()` al tocarlo.
 - `app/presentismo/api/push/suscribir/route.ts` — guarda la suscripción.
 - `app/presentismo/api/cron/enviar-chequeos/route.ts` — disparada cada hora
   por `pg_cron` en Supabase; decide a quién avisar y envía el push.
@@ -32,9 +64,6 @@ por notificación push durante la jornada laboral:
   `app/presentismo/(app)/superadmin/clientes/page.tsx` y
   `components/presentismo/superadmin/FormularioNuevoCliente.tsx` — alta de
   empresas clientes sin tocar SQL a mano.
-- `supabase/schema.sql` ahora incluye las tablas `push_subscriptions` y
-  `chequeos_ubicacion`, el tipo `estado_chequeo`, la función
-  `responder_chequeo` y el rol `super_admin`.
 
 ## Cómo está organizado
 
@@ -73,7 +102,9 @@ create extension if not exists "pgcrypto";
 -- clientes nuevas. 'admin' administra una sola empresa cliente puntual.
 create type rol_usuario as enum ('super_admin', 'admin', 'supervisor_sede', 'empleado');
 create type tipo_marcacion as enum ('ingreso', 'egreso');
-create type resultado_validacion as enum ('dentro_de_zona', 'fuera_de_zona');
+-- 'sin_geocerca' es para marcaciones de empleados en trabajo de campo (sede
+-- flotante, Etapa 3): no se compara contra ninguna sede fija.
+create type resultado_validacion as enum ('dentro_de_zona', 'fuera_de_zona', 'sin_geocerca');
 
 -- ---------------------------------------------------------------------
 -- Organizaciones (empresas cliente que contratan el servicio)
@@ -96,6 +127,10 @@ create table perfiles (
   rol rol_usuario not null default 'empleado',
   activo boolean not null default true,
   consentimiento_aceptado_at timestamptz,
+  -- Consentimiento específico para trabajo en campo (Etapa 3): se pide
+  -- aparte porque implica registrar el recorrido del día, más sensible que
+  -- el esquema "dentro/fuera de zona" del consentimiento general.
+  consentimiento_flotante_aceptado_at timestamptz,
   created_at timestamptz not null default now()
 );
 
@@ -129,6 +164,11 @@ create table empleado_sedes (
   dias_semana smallint[] not null default '{1,2,3,4,5}', -- 1=lunes ... 7=domingo
   hora_inicio time not null,
   hora_fin time not null,
+  -- Trabajo en campo (Etapa 3): la sede queda como referencia (dirección
+  -- "base"), pero no se usa como geocerca — ni al marcar ni en los chequeos
+  -- periódicos, que en cambio guardan siempre el punto para armar el
+  -- recorrido del día.
+  es_flotante boolean not null default false,
   created_at timestamptz not null default now(),
   unique (empleado_id, sede_id)
 );
@@ -177,11 +217,13 @@ create index idx_push_subscriptions_empleado on push_subscriptions(empleado_id);
 -- ---------------------------------------------------------------------
 -- Chequeos de ubicación periódicos durante la jornada (Etapa 2).
 -- Se crea uno por aviso push enviado; el empleado lo responde al tocar la
--- notificación. Las coordenadas SOLO se guardan si quedó fuera de zona —
--- si confirma dentro de zona, o no responde a tiempo, nunca se guarda
--- ninguna ubicación, solo el resultado.
+-- notificación. Para empleados con sede fija, las coordenadas SOLO se
+-- guardan si quedó fuera de zona — si confirma dentro de zona, o no
+-- responde a tiempo, nunca se guarda ninguna ubicación, solo el resultado.
+-- Para empleados en trabajo de campo (es_flotante, Etapa 3) el punto se
+-- guarda siempre, para armar el recorrido del día.
 -- ---------------------------------------------------------------------
-create type estado_chequeo as enum ('pendiente', 'confirmado_dentro', 'confirmado_fuera', 'vencido');
+create type estado_chequeo as enum ('pendiente', 'confirmado_dentro', 'confirmado_fuera', 'confirmado_campo', 'vencido');
 
 create table chequeos_ubicacion (
   id uuid primary key default gen_random_uuid(),
@@ -195,6 +237,10 @@ create table chequeos_ubicacion (
   latitud double precision,
   longitud double precision,
   distancia_metros double precision,
+  -- Copiado de empleado_sedes.es_flotante al crear el chequeo, para que
+  -- responder_chequeo() no necesite un join extra para decidir cómo
+  -- procesar la respuesta.
+  es_flotante boolean not null default false,
   created_at timestamptz not null default now()
 );
 
@@ -236,11 +282,26 @@ $$;
 
 grant execute on function aceptar_consentimiento() to authenticated;
 
+-- Igual que aceptar_consentimiento(), pero para el consentimiento
+-- específico de trabajo en campo (Etapa 3): se pide aparte porque implica
+-- registrar el recorrido del día, no solo un resultado dentro/fuera.
+create or replace function aceptar_consentimiento_campo()
+returns void
+language sql security definer
+set search_path = public
+as $$
+  update perfiles set consentimiento_flotante_aceptado_at = now() where id = auth.uid();
+$$;
+
+grant execute on function aceptar_consentimiento_campo() to authenticated;
+
 -- Responde un chequeo de ubicación periódico (Etapa 2): calcula la
 -- distancia server-side (no confía en nada que mande el cliente más que
 -- las coordenadas crudas) y decide el resultado. Solo guarda latitud y
 -- longitud si el empleado quedó fuera de zona; si está dentro, o el
 -- chequeo no le pertenece o ya fue respondido, no graba ubicación.
+-- Para chequeos de trabajo en campo (es_flotante) no hay geocerca contra la
+-- que comparar: el punto se guarda siempre, para el recorrido del día.
 create or replace function responder_chequeo(chequeo_id uuid, lat double precision, lon double precision)
 returns chequeos_ubicacion
 language plpgsql security definer
@@ -258,6 +319,14 @@ begin
 
   if not found then
     raise exception 'chequeo_no_encontrado';
+  end if;
+
+  if fila.es_flotante then
+    update chequeos_ubicacion
+      set estado = 'confirmado_campo', respondido_en = now(), latitud = lat, longitud = lon
+      where id = chequeo_id
+      returning * into fila;
+    return fila;
   end if;
 
   select latitud, longitud, radio_metros into sede_lat, sede_lon, sede_radio
@@ -685,7 +754,9 @@ export function usePush() {
 // clientes nuevas. 'admin' administra una sola empresa cliente puntual.
 export type RolUsuario = 'super_admin' | 'admin' | 'supervisor_sede' | 'empleado';
 export type TipoMarcacion = 'ingreso' | 'egreso';
-export type ResultadoValidacion = 'dentro_de_zona' | 'fuera_de_zona';
+// 'sin_geocerca' es para marcaciones de trabajo en campo (Etapa 3): no se
+// compara contra ninguna sede fija.
+export type ResultadoValidacion = 'dentro_de_zona' | 'fuera_de_zona' | 'sin_geocerca';
 
 export interface Organizacion {
   id: string;
@@ -702,6 +773,7 @@ export interface Perfil {
   rol: RolUsuario;
   activo: boolean;
   consentimiento_aceptado_at: string | null;
+  consentimiento_flotante_aceptado_at: string | null;
   created_at: string;
 }
 
@@ -723,6 +795,7 @@ export interface EmpleadoSede {
   dias_semana: number[];
   hora_inicio: string;
   hora_fin: string;
+  es_flotante: boolean;
   created_at: string;
 }
 
@@ -743,9 +816,16 @@ export interface Marcacion {
 }
 
 // 'pendiente' = avisado, esperando respuesta. 'confirmado_dentro'/'confirmado_fuera'
-// = el empleado tocó el aviso y se comparó su ubicación contra la sede. 'vencido'
-// = no respondió a tiempo. Solo confirmado_fuera guarda latitud/longitud.
-export type EstadoChequeo = 'pendiente' | 'confirmado_dentro' | 'confirmado_fuera' | 'vencido';
+// = el empleado tocó el aviso y se comparó su ubicación contra la sede.
+// 'confirmado_campo' = chequeo de trabajo en campo (sin geocerca), siempre
+// guarda el punto. 'vencido' = no respondió a tiempo. De los que sí tienen
+// geocerca, solo confirmado_fuera guarda latitud/longitud.
+export type EstadoChequeo =
+  | 'pendiente'
+  | 'confirmado_dentro'
+  | 'confirmado_fuera'
+  | 'confirmado_campo'
+  | 'vencido';
 
 export interface PushSubscriptionRow {
   id: string;
@@ -768,6 +848,7 @@ export interface ChequeoUbicacion {
   latitud: number | null;
   longitud: number | null;
   distancia_metros: number | null;
+  es_flotante: boolean;
   created_at: string;
 }
 
@@ -1198,11 +1279,16 @@ export default function BadgeResultado({
   tarde: boolean;
 }) {
   const dentro = resultado === 'dentro_de_zona';
+  const sinGeocerca = resultado === 'sin_geocerca';
 
   return (
     <span className="flex items-center gap-1.5 text-sm">
-      <span className={dentro ? 'text-green-700' : 'text-red-600 font-medium'}>
-        {dentro ? 'En zona' : 'Fuera de zona'}
+      <span
+        className={
+          sinGeocerca ? 'text-gray-500' : dentro ? 'text-green-700' : 'text-red-600 font-medium'
+        }
+      >
+        {sinGeocerca ? 'Campo' : dentro ? 'En zona' : 'Fuera de zona'}
       </span>
       {tarde && (
         <span className="px-1.5 py-0.5 rounded bg-amarillo text-gray-900 text-xs font-medium">
@@ -1433,7 +1519,9 @@ export default function ManejadorChequeo() {
       setMensaje(
         chequeo.estado === 'confirmado_dentro'
           ? 'Ubicación confirmada, todo en orden.'
-          : 'Ubicación confirmada — quedó registrado que estabas fuera del área asignada.'
+          : chequeo.estado === 'confirmado_campo'
+            ? 'Ubicación registrada.'
+            : 'Ubicación confirmada — quedó registrado que estabas fuera del área asignada.'
       );
     }
 
@@ -1477,6 +1565,11 @@ const ITEMS: { href: string; label: string; roles: RolUsuario[] }[] = [
   {
     href: '/presentismo/admin',
     label: 'Presentismo del equipo',
+    roles: ['super_admin', 'admin', 'supervisor_sede'],
+  },
+  {
+    href: '/presentismo/admin/reportes',
+    label: 'Reportes',
     roles: ['super_admin', 'admin', 'supervisor_sede'],
   },
   { href: '/presentismo/admin/sedes', label: 'Sedes', roles: ['super_admin', 'admin'] },
@@ -1785,6 +1878,7 @@ export default function FormularioAsignacion({
   const [diasSemana, setDiasSemana] = useState<number[]>(DIAS_HABILES_DEFAULT);
   const [horaInicio, setHoraInicio] = useState('08:00');
   const [horaFin, setHoraFin] = useState('17:00');
+  const [esFlotante, setEsFlotante] = useState(false);
   const [enviando, setEnviando] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1807,7 +1901,7 @@ export default function FormularioAsignacion({
     const res = await fetch('/presentismo/api/admin/asignaciones', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ empleadoId, sedeId, diasSemana, horaInicio, horaFin }),
+      body: JSON.stringify({ empleadoId, sedeId, diasSemana, horaInicio, horaFin, esFlotante }),
     });
 
     setEnviando(false);
@@ -1893,6 +1987,19 @@ export default function FormularioAsignacion({
           />
         </div>
       </div>
+
+      <label className="flex items-start gap-2 text-sm text-gray-700">
+        <input
+          type="checkbox"
+          checked={esFlotante}
+          onChange={(e) => setEsFlotante(e.target.checked)}
+          className="mt-0.5"
+        />
+        <span>
+          Trabajo en campo (sin geocerca fija) — no se valida la ubicación contra esta sede; se
+          usa solo como referencia. Requiere que el empleado acepte un consentimiento aparte.
+        </span>
+      </label>
 
       {error && <p className="text-sm text-red-600">{error}</p>}
 
@@ -2521,6 +2628,7 @@ import { obtenerSesionActual } from '@/lib/presentismo/sesion';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
 import { rangoDiaActualISO } from '@/lib/presentismo/fecha';
 import PantallaConsentimiento from '@/components/presentismo/PantallaConsentimiento';
+import PantallaConsentimientoCampo from '@/components/presentismo/PantallaConsentimientoCampo';
 import PanelMarcado from '@/components/presentismo/PanelMarcado';
 import BadgeResultado from '@/components/presentismo/BadgeResultado';
 import RegistroPush from '@/components/presentismo/RegistroPush';
@@ -2544,6 +2652,21 @@ export default async function PresentismoHomePage() {
   }
 
   const supabase = await crearClienteServidor();
+
+  if (!sesion.perfil.consentimiento_flotante_aceptado_at) {
+    const { data: asignacionFlotante } = await supabase
+      .from('empleado_sedes')
+      .select('id')
+      .eq('empleado_id', sesion.userId)
+      .eq('es_flotante', true)
+      .limit(1)
+      .maybeSingle();
+
+    if (asignacionFlotante) {
+      return <PantallaConsentimientoCampo />;
+    }
+  }
+
   const { inicio, fin } = rangoDiaActualISO();
 
   const { data: marcacionesHoy } = await supabase
@@ -3007,7 +3130,14 @@ export default async function DetalleEmpleadoPage({
         {asignaciones.map((a) => (
           <div key={a.id} className="p-4 flex items-center justify-between text-sm">
             <div>
-              <p className="font-medium text-gray-800">{a.sede.nombre}</p>
+              <p className="font-medium text-gray-800 flex items-center gap-1.5">
+                {a.sede.nombre}
+                {a.es_flotante && (
+                  <span className="px-1.5 py-0.5 rounded bg-lila/20 text-lila text-xs font-medium">
+                    Campo
+                  </span>
+                )}
+              </p>
               <p className="text-gray-500">
                 {nombresDias(a.dias_semana)} · {a.hora_inicio.slice(0, 5)} a {a.hora_fin.slice(0, 5)}
               </p>
@@ -3082,7 +3212,12 @@ export default async function ClientesPage() {
 ```ts
 import { NextResponse } from 'next/server';
 import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
-import { evaluarUbicacionContraSedes, esTarde, type AsignacionConSede } from '@/lib/presentismo/geo';
+import {
+  evaluarUbicacionContraSedes,
+  esTarde,
+  sedesVigentesHoy,
+  type AsignacionConSede,
+} from '@/lib/presentismo/geo';
 import type { EmpleadoSede, Sede } from '@/lib/presentismo/database.types';
 
 interface CuerpoMarcar {
@@ -3131,11 +3266,25 @@ export async function POST(request: Request) {
     .filter((a: EmpleadoSede & { sede: Sede | null }) => a.sede)
     .map((a: EmpleadoSede & { sede: Sede | null }) => ({ asignacion: a, sede: a.sede as Sede }));
 
-  const evaluacion = evaluarUbicacionContraSedes(asignaciones, lat, lon);
-
   const ahora = new Date();
-  const tarde =
-    tipo === 'ingreso' && evaluacion ? esTarde(ahora, evaluacion.asignacion.hora_inicio) : false;
+
+  // Trabajo en campo (Etapa 3): si alguna asignación vigente hoy es
+  // flotante, no se evalúa geocerca — se acepta la marcación desde
+  // cualquier lugar. La sede de la asignación queda solo como referencia.
+  const asignacionFlotante = sedesVigentesHoy(asignaciones, ahora).find(
+    ({ asignacion }) => asignacion.es_flotante
+  );
+
+  const evaluacion = asignacionFlotante ? null : evaluarUbicacionContraSedes(asignaciones, lat, lon, ahora);
+
+  const horaInicioReferencia = asignacionFlotante?.asignacion.hora_inicio ?? evaluacion?.asignacion.hora_inicio;
+  const tarde = tipo === 'ingreso' && horaInicioReferencia ? esTarde(ahora, horaInicioReferencia) : false;
+
+  const resultado: 'dentro_de_zona' | 'fuera_de_zona' | 'sin_geocerca' = asignacionFlotante
+    ? 'sin_geocerca'
+    : evaluacion?.dentroDeZona
+      ? 'dentro_de_zona'
+      : 'fuera_de_zona';
 
   const { data: marcacion, error } = await supabase
     .from('marcaciones')
@@ -3147,9 +3296,9 @@ export async function POST(request: Request) {
       latitud: lat,
       longitud: lon,
       precision_metros: precisionMetros ?? null,
-      sede_id: evaluacion?.sede.id ?? null,
-      distancia_metros: evaluacion?.distanciaMetros ?? null,
-      resultado: evaluacion?.dentroDeZona ? 'dentro_de_zona' : 'fuera_de_zona',
+      sede_id: asignacionFlotante?.sede.id ?? evaluacion?.sede.id ?? null,
+      distancia_metros: asignacionFlotante ? null : (evaluacion?.distanciaMetros ?? null),
+      resultado,
       tarde,
     })
     .select()
@@ -3344,6 +3493,7 @@ export async function POST(request: Request) {
         enviado_en: ahora.toISOString(),
         vence_en: venceEn,
         estado: 'pendiente',
+        es_flotante: asignacion.es_flotante,
       })
       .select()
       .single();
@@ -3605,6 +3755,7 @@ interface CuerpoAsignacion {
   diasSemana?: number[];
   horaInicio?: string;
   horaFin?: string;
+  esFlotante?: boolean;
 }
 
 export async function POST(request: Request) {
@@ -3621,7 +3772,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'body_invalido' }, { status: 400 });
   }
 
-  const { empleadoId, sedeId, diasSemana, horaInicio, horaFin } = body;
+  const { empleadoId, sedeId, diasSemana, horaInicio, horaFin, esFlotante } = body;
   if (
     !empleadoId ||
     !sedeId ||
@@ -3642,6 +3793,7 @@ export async function POST(request: Request) {
       dias_semana: diasSemana,
       hora_inicio: horaInicio,
       hora_fin: horaFin,
+      es_flotante: esFlotante === true,
     })
     .select()
     .single();
@@ -3818,5 +3970,499 @@ self.addEventListener('notificationclick', (event) => {
   // cuando puede, así que no hace falta buscarla a mano.
   event.waitUntil(self.clients.openWindow(url));
 });
+```
+
+## `lib/presentismo/reportes.ts`
+
+```ts
+import { diaSemanaActual } from './geo';
+import { rangoDiaActualISO } from './fecha';
+import type { crearClienteServidor } from './supabase-server';
+import type { EmpleadoSede, Marcacion, Sede } from './database.types';
+
+type ClienteRLS = Awaited<ReturnType<typeof crearClienteServidor>>;
+
+export interface FilaReporte {
+  empleadoId: string;
+  sedeNombre: string;
+  esFlotante: boolean;
+  horaIngreso: string | null;
+  horaEgreso: string | null;
+  resultado: Marcacion['resultado'] | null;
+  tarde: boolean;
+  ausente: boolean;
+  puntosRecorrido: number;
+}
+
+/**
+ * Arma una fila por empleado con alguna asignación vigente para el día de la
+ * fecha dada, cruzando sus marcaciones de ese día y, si trabaja en campo,
+ * cuántos puntos de recorrido quedaron guardados. Usa el cliente pasado tal
+ * cual (respeta el scope de RLS de quien lo pida: admin ve toda la
+ * organización, supervisor solo sus sedes).
+ */
+export async function obtenerFilasReporte(
+  supabase: ClienteRLS,
+  fecha: Date
+): Promise<FilaReporte[]> {
+  const diaSemana = diaSemanaActual(fecha);
+  const { inicio, fin } = rangoDiaActualISO(fecha);
+
+  const [{ data: asignacionesData }, { data: marcacionesData }, { data: chequeosData }] =
+    await Promise.all([
+      supabase.from('empleado_sedes').select('*, sede:sedes(*)').contains('dias_semana', [diaSemana]),
+      supabase
+        .from('marcaciones')
+        .select('*')
+        .gte('timestamp_marcacion', inicio)
+        .lte('timestamp_marcacion', fin)
+        .order('timestamp_marcacion', { ascending: true }),
+      supabase
+        .from('chequeos_ubicacion')
+        .select('empleado_id')
+        .eq('estado', 'confirmado_campo')
+        .gte('enviado_en', inicio)
+        .lte('enviado_en', fin),
+    ]);
+
+  const asignaciones = (asignacionesData ?? []) as (EmpleadoSede & { sede: Sede | null })[];
+  const marcaciones = (marcacionesData ?? []) as Marcacion[];
+
+  const marcacionesPorEmpleado = new Map<string, Marcacion[]>();
+  for (const m of marcaciones) {
+    const lista = marcacionesPorEmpleado.get(m.empleado_id) ?? [];
+    lista.push(m);
+    marcacionesPorEmpleado.set(m.empleado_id, lista);
+  }
+
+  const puntosPorEmpleado = new Map<string, number>();
+  for (const c of (chequeosData ?? []) as { empleado_id: string }[]) {
+    puntosPorEmpleado.set(c.empleado_id, (puntosPorEmpleado.get(c.empleado_id) ?? 0) + 1);
+  }
+
+  // Una fila por empleado: si tiene varias asignaciones vigentes ese día, se
+  // queda con la primera para mostrar sede/flotante (caso poco común).
+  const asignacionPorEmpleado = new Map<string, EmpleadoSede & { sede: Sede | null }>();
+  for (const a of asignaciones) {
+    if (!asignacionPorEmpleado.has(a.empleado_id)) asignacionPorEmpleado.set(a.empleado_id, a);
+  }
+
+  const filas: FilaReporte[] = [];
+  for (const [empleadoId, asignacion] of asignacionPorEmpleado) {
+    const marcacionesEmpleado = marcacionesPorEmpleado.get(empleadoId) ?? [];
+    const primerIngreso = marcacionesEmpleado.find((m) => m.tipo === 'ingreso');
+    const ultimoEgreso = [...marcacionesEmpleado].reverse().find((m) => m.tipo === 'egreso');
+
+    filas.push({
+      empleadoId,
+      sedeNombre: asignacion.sede?.nombre ?? '—',
+      esFlotante: asignacion.es_flotante,
+      horaIngreso: primerIngreso?.timestamp_marcacion ?? null,
+      horaEgreso: ultimoEgreso?.timestamp_marcacion ?? null,
+      resultado: primerIngreso?.resultado ?? null,
+      tarde: primerIngreso?.tarde ?? false,
+      ausente: !primerIngreso,
+      puntosRecorrido: puntosPorEmpleado.get(empleadoId) ?? 0,
+    });
+  }
+
+  return filas;
+}
+
+export function textoEstado(fila: FilaReporte): string {
+  if (fila.ausente) return 'Ausente';
+  if (fila.resultado === 'sin_geocerca') return fila.tarde ? 'Campo (tarde)' : 'Campo';
+  if (fila.resultado === 'fuera_de_zona') return fila.tarde ? 'Fuera de zona (tarde)' : 'Fuera de zona';
+  return fila.tarde ? 'Tarde' : 'A horario';
+}
+```
+
+## `components/presentismo/PantallaConsentimientoCampo.tsx`
+
+```tsx
+'use client';
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+
+export default function PantallaConsentimientoCampo() {
+  const router = useRouter();
+  const [cargando, setCargando] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function aceptar() {
+    setCargando(true);
+    setError(null);
+
+    const res = await fetch('/presentismo/api/consentimiento-campo', { method: 'POST' });
+
+    if (!res.ok) {
+      setCargando(false);
+      setError('No pudimos guardar tu aceptación. Probá de nuevo.');
+      return;
+    }
+
+    router.refresh();
+  }
+
+  return (
+    <div className="bg-white rounded-lg shadow-md p-6 space-y-4">
+      <h2 className="text-lg font-bold text-navy">Trabajo en campo</h2>
+      <p className="text-sm text-gray-700">
+        Tu puesto está configurado como trabajo en campo, sin un lugar fijo. Esto cambia lo que
+        hacemos con tu ubicación:
+      </p>
+      <ul className="text-sm text-gray-700 list-disc pl-5 space-y-1.5">
+        <li>
+          Durante tu horario laboral asignado, la app va a registrar tu ubicación en cada aviso de
+          chequeo que confirmes — no solo si te alejás de un área, como en el esquema general.
+        </li>
+        <li>Con esos puntos, tu empleador puede ver el recorrido del día.</li>
+        <li>Fuera de tu horario laboral, la app no accede a tu ubicación bajo ninguna circunstancia.</li>
+        <li>Podés consultar tu propio historial de marcaciones cuando quieras.</li>
+      </ul>
+      <p className="text-xs text-gray-500">
+        Tratamiento de datos conforme a la Ley 25.326 de Protección de Datos Personales.
+      </p>
+
+      {error && <p className="text-sm text-red-600">{error}</p>}
+
+      <button
+        onClick={aceptar}
+        disabled={cargando}
+        className="w-full bg-navy text-white rounded-md py-3 font-medium disabled:opacity-50"
+      >
+        {cargando ? 'Guardando…' : 'Entiendo y acepto'}
+      </button>
+    </div>
+  );
+}
+```
+
+## `components/presentismo/admin/SelectorFechaReporte.tsx`
+
+```tsx
+'use client';
+
+import { useRouter } from 'next/navigation';
+
+export default function SelectorFechaReporte({ fecha }: { fecha: string }) {
+  const router = useRouter();
+
+  return (
+    <input
+      type="date"
+      value={fecha}
+      onChange={(e) => router.push(`/presentismo/admin/reportes?fecha=${e.target.value}`)}
+      className="border border-gray-300 rounded-md px-3 py-2 text-sm bg-white"
+    />
+  );
+}
+```
+
+## `app/presentismo/(app)/admin/reportes/page.tsx`
+
+```tsx
+import { redirect } from 'next/navigation';
+import Link from 'next/link';
+import { obtenerSesionActual } from '@/lib/presentismo/sesion';
+import { crearClienteServidor, crearClienteAdmin } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
+import { fechaLocalYMD } from '@/lib/presentismo/fecha';
+import { obtenerFilasReporte, textoEstado } from '@/lib/presentismo/reportes';
+import SelectorFechaReporte from '@/components/presentismo/admin/SelectorFechaReporte';
+
+function formatearHora(iso: string) {
+  return new Date(iso).toLocaleTimeString('es-AR', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'America/Argentina/Buenos_Aires',
+  });
+}
+
+function colorEstado(estado: string) {
+  if (estado === 'Ausente') return 'text-gray-400';
+  if (estado.startsWith('Fuera de zona')) return 'text-red-600 font-medium';
+  if (estado.startsWith('Campo')) return 'text-lila';
+  if (estado === 'Tarde') return 'text-amarillo font-medium';
+  return 'text-green-700';
+}
+
+export default async function ReportesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ fecha?: string }>;
+}) {
+  const sesion = await obtenerSesionActual();
+  if (!sesion) return null;
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol) && sesion.perfil.rol !== 'supervisor_sede') {
+    redirect('/presentismo');
+  }
+
+  const { fecha: fechaParam } = await searchParams;
+  const fecha = fechaParam ?? fechaLocalYMD();
+  const fechaDate = new Date(`${fecha}T12:00:00-03:00`);
+
+  const supabase = await crearClienteServidor();
+  const filas = await obtenerFilasReporte(supabase, fechaDate);
+
+  const admin = crearClienteAdmin();
+  const empleadoIds = filas.map((f) => f.empleadoId);
+  const { data: perfilesData } = await admin
+    .from('perfiles')
+    .select('id, nombre_completo')
+    .in('id', empleadoIds.length > 0 ? empleadoIds : ['']);
+  const nombrePorEmpleadoId = new Map((perfilesData ?? []).map((p) => [p.id, p.nombre_completo]));
+
+  const filasOrdenadas = [...filas].sort((a, b) =>
+    (nombrePorEmpleadoId.get(a.empleadoId) ?? '').localeCompare(nombrePorEmpleadoId.get(b.empleadoId) ?? '')
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-navy">Reportes</h1>
+          <p className="text-sm text-gray-500">Presentismo del día elegido, para exportar a nómina.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <SelectorFechaReporte fecha={fecha} />
+          <a
+            href={`/presentismo/api/admin/reportes/csv?fecha=${fecha}`}
+            className="bg-navy text-white rounded-md px-4 py-2 text-sm font-medium"
+          >
+            Descargar CSV
+          </a>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-md divide-y divide-gray-100">
+        {filasOrdenadas.length === 0 && (
+          <p className="p-4 text-sm text-gray-500">
+            Nadie tenía una asignación vigente ese día.
+          </p>
+        )}
+        {filasOrdenadas.map((f) => {
+          const estado = textoEstado(f);
+          return (
+            <div key={f.empleadoId} className="p-4 flex items-center justify-between text-sm gap-2">
+              <div className="min-w-0">
+                <p className="font-medium text-gray-800 truncate">
+                  {nombrePorEmpleadoId.get(f.empleadoId) ?? 'Empleado'}
+                </p>
+                <p className="text-gray-500 truncate">
+                  {f.sedeNombre}
+                  {f.horaIngreso && ` · Ingreso ${formatearHora(f.horaIngreso)}`}
+                  {f.horaEgreso && ` · Egreso ${formatearHora(f.horaEgreso)}`}
+                </p>
+                {f.esFlotante && f.puntosRecorrido > 0 && (
+                  <Link
+                    href={`/presentismo/admin/reportes/recorrido/${f.empleadoId}?fecha=${fecha}`}
+                    className="text-celeste underline text-xs"
+                  >
+                    Ver recorrido ({f.puntosRecorrido} puntos)
+                  </Link>
+                )}
+              </div>
+              <span className={`text-xs font-medium shrink-0 ${colorEstado(estado)}`}>{estado}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+```
+
+## `app/presentismo/(app)/admin/reportes/recorrido/[empleadoId]/page.tsx`
+
+```tsx
+import { redirect } from 'next/navigation';
+import Link from 'next/link';
+import { obtenerSesionActual } from '@/lib/presentismo/sesion';
+import { crearClienteServidor, crearClienteAdmin } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
+import { fechaLocalYMD, rangoDiaActualISO } from '@/lib/presentismo/fecha';
+import type { ChequeoUbicacion } from '@/lib/presentismo/database.types';
+
+function formatearHora(iso: string) {
+  return new Date(iso).toLocaleTimeString('es-AR', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'America/Argentina/Buenos_Aires',
+  });
+}
+
+export default async function RecorridoPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ empleadoId: string }>;
+  searchParams: Promise<{ fecha?: string }>;
+}) {
+  const sesion = await obtenerSesionActual();
+  if (!sesion) return null;
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol) && sesion.perfil.rol !== 'supervisor_sede') {
+    redirect('/presentismo');
+  }
+
+  const { empleadoId } = await params;
+  const { fecha: fechaParam } = await searchParams;
+  const fecha = fechaParam ?? fechaLocalYMD();
+  const fechaDate = new Date(`${fecha}T12:00:00-03:00`);
+  const { inicio, fin } = rangoDiaActualISO(fechaDate);
+
+  const supabase = await crearClienteServidor();
+  const { data: chequeosData } = await supabase
+    .from('chequeos_ubicacion')
+    .select('*')
+    .eq('empleado_id', empleadoId)
+    .eq('estado', 'confirmado_campo')
+    .gte('enviado_en', inicio)
+    .lte('enviado_en', fin)
+    .order('enviado_en', { ascending: true });
+
+  const puntos = (chequeosData ?? []) as ChequeoUbicacion[];
+
+  const admin = crearClienteAdmin();
+  const { data: empleado } = await admin
+    .from('perfiles')
+    .select('nombre_completo')
+    .eq('id', empleadoId)
+    .eq('organizacion_id', sesion.organizacion.id)
+    .single();
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <Link href={`/presentismo/admin/reportes?fecha=${fecha}`} className="text-celeste underline text-sm">
+          ← Volver a reportes
+        </Link>
+        <h1 className="text-xl font-bold text-navy mt-1">
+          Recorrido de {empleado?.nombre_completo ?? 'empleado'}
+        </h1>
+        <p className="text-sm text-gray-500">{fecha}</p>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-md divide-y divide-gray-100">
+        {puntos.length === 0 && (
+          <p className="p-4 text-sm text-gray-500">No hay puntos de recorrido guardados ese día.</p>
+        )}
+        {puntos.map((p) => (
+          <div key={p.id} className="p-4 flex items-center justify-between text-sm">
+            <span className="text-gray-700">{formatearHora(p.enviado_en)}</span>
+            <span className="text-gray-500">
+              {p.latitud?.toFixed(5)}, {p.longitud?.toFixed(5)}
+            </span>
+            <a
+              href={`https://www.google.com/maps?q=${p.latitud},${p.longitud}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-celeste underline"
+            >
+              Ver en el mapa
+            </a>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+## `app/presentismo/api/admin/reportes/csv/route.ts`
+
+```ts
+import { NextResponse } from 'next/server';
+import { obtenerSesionActual } from '@/lib/presentismo/sesion';
+import { crearClienteServidor, crearClienteAdmin } from '@/lib/presentismo/supabase-server';
+import { ROLES_ADMIN_EMPRESA } from '@/lib/presentismo/constants';
+import { fechaLocalYMD } from '@/lib/presentismo/fecha';
+import { obtenerFilasReporte, textoEstado } from '@/lib/presentismo/reportes';
+
+function formatearHora(iso: string) {
+  return new Date(iso).toLocaleTimeString('es-AR', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'America/Argentina/Buenos_Aires',
+  });
+}
+
+function celdaCsv(valor: string) {
+  return `"${valor.replace(/"/g, '""')}"`;
+}
+
+export async function GET(request: Request) {
+  const sesion = await obtenerSesionActual();
+  if (!sesion) return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
+  if (!ROLES_ADMIN_EMPRESA.includes(sesion.perfil.rol) && sesion.perfil.rol !== 'supervisor_sede') {
+    return NextResponse.json({ error: 'no_autorizado' }, { status: 403 });
+  }
+
+  const { searchParams } = new URL(request.url);
+  const fecha = searchParams.get('fecha') ?? fechaLocalYMD();
+  const fechaDate = new Date(`${fecha}T12:00:00-03:00`);
+
+  const supabase = await crearClienteServidor();
+  const filas = await obtenerFilasReporte(supabase, fechaDate);
+
+  const admin = crearClienteAdmin();
+  const empleadoIds = filas.map((f) => f.empleadoId);
+  const { data: perfilesData } = await admin
+    .from('perfiles')
+    .select('id, nombre_completo')
+    .in('id', empleadoIds.length > 0 ? empleadoIds : ['']);
+  const nombrePorEmpleadoId = new Map((perfilesData ?? []).map((p) => [p.id, p.nombre_completo]));
+
+  const filasOrdenadas = [...filas].sort((a, b) =>
+    (nombrePorEmpleadoId.get(a.empleadoId) ?? '').localeCompare(nombrePorEmpleadoId.get(b.empleadoId) ?? '')
+  );
+
+  const encabezado = ['Empleado', 'Sede', 'Ingreso', 'Egreso', 'Estado', 'Tarde'];
+  const filasCsv = filasOrdenadas.map((f) => [
+    nombrePorEmpleadoId.get(f.empleadoId) ?? 'Empleado',
+    f.sedeNombre,
+    f.horaIngreso ? formatearHora(f.horaIngreso) : '',
+    f.horaEgreso ? formatearHora(f.horaEgreso) : '',
+    textoEstado(f),
+    f.tarde ? 'Sí' : 'No',
+  ]);
+
+  const lineas = [encabezado, ...filasCsv].map((fila) => fila.map(celdaCsv).join(';'));
+  // BOM UTF-8 para que Excel reconozca los acentos sin configuración extra.
+  const csv = '﻿' + lineas.join('\r\n') + '\r\n';
+
+  return new NextResponse(csv, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="presentismo_${fecha}.csv"`,
+    },
+  });
+}
+```
+
+## `app/presentismo/api/consentimiento-campo/route.ts`
+
+```ts
+import { NextResponse } from 'next/server';
+import { crearClienteServidor } from '@/lib/presentismo/supabase-server';
+
+export async function POST() {
+  const supabase = await crearClienteServidor();
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ error: 'no_autenticado' }, { status: 401 });
+  }
+
+  const { error } = await supabase.rpc('aceptar_consentimiento_campo');
+  if (error) {
+    return NextResponse.json({ error: 'error_guardando' }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true });
+}
 ```
 
