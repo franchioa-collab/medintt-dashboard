@@ -11,6 +11,7 @@ const ALIAS_ROL = ['rol', 'role', 'perfil'];
 const ETIQUETAS_ROL: Record<string, RolUsuario> = {
   empleado: 'empleado',
   supervisor: 'supervisor_sede',
+  supervisorsede: 'supervisor_sede',
   supervisordesede: 'supervisor_sede',
   admin: 'admin',
   administrador: 'admin',
